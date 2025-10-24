@@ -120,6 +120,7 @@ class QueueClient:
         self.debug = debug
         self.ctx: Ctx | None = None
         self.proxy = proxy
+        self.unspecified_retry_count = 0
 
     async def __aenter__(self):
         await self._get_ctx()
@@ -134,7 +135,10 @@ class QueueClient:
 
         ctx, self.ctx, self.req_count = self.ctx, None, 0
         username = ctx.acc.username
-        await ctx.aclose()
+        
+        # if inactive or reset_at > 0:
+        #     print(f"Closing client for {username}")
+        #     await ctx.aclose()
 
         if inactive:
             await self.pool.mark_inactive(username, msg)
@@ -215,6 +219,17 @@ class QueueClient:
             logger.warning(f"Session expired or banned: {log_msg}")
             await self._close_ctx(-1, inactive=True, msg=None)
             raise HandledError()
+
+        if "Dependency: Unspecified" in err_msg:
+            self.unspecified_retry_count += 1
+            if self.unspecified_retry_count >= 3:
+                logger.warning(
+                    f"Dependency: Unspecified: {log_msg}, retry count: {self.unspecified_retry_count}"
+                )
+                return
+            else:
+                raise HandledError()
+        self.unspecified_retry_count = 0
 
         # something from twitter side - abort all queries, see: https://github.com/vladkens/twscrape/pull/80
         if err_msg.startswith("(131) Dependency: Internal error"):
