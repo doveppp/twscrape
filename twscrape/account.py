@@ -5,11 +5,12 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
 from httpx import AsyncClient, AsyncHTTPTransport
-
+from httpx._config import Limits
 from .models import JSONTrait
 from .utils import utc
 
 TOKEN = "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
+GLOBAL_TRANSPORT = AsyncHTTPTransport(retries=3, limits=Limits(max_connections=100, keepalive_expiry=30))
 
 
 @dataclass
@@ -55,8 +56,7 @@ class Account(JSONTrait):
         proxies = [x for x in proxies if x is not None]
         proxy = proxies[0] if proxies else None
 
-        transport = AsyncHTTPTransport(retries=3)
-        client = AsyncClient(proxy=proxy, follow_redirects=True, transport=transport)
+        client = AsyncClient(proxy=proxy, follow_redirects=True, transport=GLOBAL_TRANSPORT)
 
         # saved from previous usage
         client.cookies.update(self.cookies)

@@ -8,12 +8,18 @@ import time
 
 import bs4
 import httpx
+from httpx import AsyncHTTPTransport
+from httpx._config import Limits
 from fake_useragent import UserAgent
+
+GLOBAL_TRANSPORT = AsyncHTTPTransport(
+    retries=3, limits=Limits(max_connections=100, keepalive_expiry=30)
+)
 
 
 def _make_client() -> httpx.AsyncClient:
     headers = {"user-agent": UserAgent().chrome}
-    return httpx.AsyncClient(headers=headers, follow_redirects=True)
+    return httpx.AsyncClient(headers=headers, follow_redirects=True, transport=GLOBAL_TRANSPORT)
 
 
 async def get_tw_page_text(url: str, clt: httpx.AsyncClient | None = None):
