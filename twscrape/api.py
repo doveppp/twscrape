@@ -1,3 +1,4 @@
+import os
 from contextlib import aclosing
 from typing import Literal
 
@@ -5,7 +6,17 @@ from httpx import Response
 
 from .accounts_pool import AccountsPool
 from .logger import set_log_level
-from .models import Tweet, User, parse_trends, parse_tweet, parse_tweets, parse_user, parse_users
+from .models import (
+    AccountAbout,
+    Tweet,
+    User,
+    parse_about,
+    parse_trends,
+    parse_tweet,
+    parse_tweets,
+    parse_user,
+    parse_users,
+)
 from .queue_client import QueueClient
 from .utils import encode_params, find_obj, get_by_path
 
@@ -25,7 +36,7 @@ OP_UserCreatorSubscriptions = "7qcGrVKpcooih_VvJLA1ng/UserCreatorSubscriptions"
 OP_UserMedia = "vFPc2LVIu7so2uA_gHQAdg/UserMedia"
 OP_Bookmarks = "-LGfdImKeQz0xS_jjUwzlA/Bookmarks"
 OP_GenericTimelineById = "CT0YFEFf5GOYa5DJcxM91w/GenericTimelineById"
-
+OP_AboutAccountQuery = "zs_jFPFT78rBpXv9Z3U2YQ/AboutAccountQuery"
 GQL_URL = "https://x.com/i/api/graphql"
 GQL_FEATURES = {  # search values here (view source) https://x.com/
     "articles_preview_enabled": False,
@@ -117,7 +128,8 @@ class API:
     ):
         queue, cur, cnt, active = op.split("/")[-1], None, 0, True
         kv, ft = {**kv}, {**GQL_FEATURES, **(ft or {})}
-
+        if os.getenv("INITALIZED_CURSOR") is not None:
+            cur = os.getenv("INITALIZED_CURSOR")
         async with QueueClient(self.pool, queue, self.debug, proxy=self.proxy) as client:
             while active:
                 params = {"variables": kv, "features": ft}
@@ -514,3 +526,13 @@ class API:
             async for rep in gen:
                 for x in parse_tweets(rep.json(), limit):
                     yield x
+
+    async def user_about_raw(self, username: str, kv: KV = None):
+        op = OP_AboutAccountQuery
+        kv = {"screenName": username, **(kv or {})}
+        ft = {"responsive_web_graphql_timeline_navigation_enabled": True}
+        return await self._gql_item(op, kv, ft)
+
+    async def user_about(self, username: str, kv: KV = None) -> AccountAbout | None:
+        rep = await self.user_about_raw(username, kv=kv)
+        return parse_about(rep) if rep else None
