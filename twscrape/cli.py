@@ -4,13 +4,13 @@ import argparse
 import asyncio
 import io
 import json
-import sqlite3
+import os
 from importlib.metadata import version
 
 import httpx
 
 from .api import API, AccountsPool
-from .db import get_sqlite_version
+from .db import DB
 from .logger import logger, set_log_level
 from .login import LoginConfig
 from .models import Tweet, User
@@ -46,7 +46,6 @@ async def main(args):
 
     if args.command == "version":
         print(f"twscrape: {version('twscrape')}")
-        print(f"SQLite runtime: {sqlite3.sqlite_version} ({await get_sqlite_version()})")
         return
 
     login_config = LoginConfig(getattr(args, "email_first", False), getattr(args, "manual", False))
@@ -139,9 +138,18 @@ def custom_help(p):
     print("\n".join(msg))
 
 
+async def run_main(args):
+    try:
+        await main(args)
+    finally:
+        await DB.close_all()
+
+
 def run():
     p = argparse.ArgumentParser(add_help=False, formatter_class=CustomHelpFormatter)
-    p.add_argument("--db", default="accounts.db", help="Accounts database file")
+    p.add_argument(
+        "--db", default=os.getenv("TWSCRAPE_DB", "accounts.db"), help="Accounts database file"
+    )
     p.add_argument("--debug", action="store_true", help="Enable debug mode")
     subparsers = p.add_subparsers(dest="command")
 
@@ -202,6 +210,10 @@ def run():
         return custom_help(p)
 
     try:
-        asyncio.run(main(args))
+        asyncio.run(run_main(args))
     except KeyboardInterrupt:
         pass
+
+
+if __name__ == "__main__":
+    run()

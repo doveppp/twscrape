@@ -15,6 +15,9 @@ class utc:
 
     @staticmethod
     def from_iso(iso: str) -> datetime:
+        # Check if wrapped in quotes, which happens with JSON extracts in some DBs
+        if iso.startswith('"') and iso.endswith('"'):
+            iso = iso[1:-1]
         return datetime.fromisoformat(iso).replace(tzinfo=timezone.utc)
 
     @staticmethod

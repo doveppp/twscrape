@@ -1,16 +1,18 @@
 import json
 import os
-import sqlite3
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from httpx import AsyncClient, AsyncHTTPTransport
 from httpx._config import Limits
+
 from .models import JSONTrait
 from .utils import utc
 
 TOKEN = "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
-GLOBAL_TRANSPORT = AsyncHTTPTransport(retries=3, limits=Limits(max_connections=100, keepalive_expiry=30))
+GLOBAL_TRANSPORT = AsyncHTTPTransport(
+    retries=3, limits=Limits(max_connections=100, keepalive_expiry=30)
+)
 
 
 @dataclass
@@ -32,14 +34,23 @@ class Account(JSONTrait):
     _tx: str | None = None
 
     @staticmethod
-    def from_rs(rs: sqlite3.Row):
+    def from_rs(rs: dict):
         doc = dict(rs)
         doc["locks"] = {k: utc.from_iso(v) for k, v in json.loads(doc["locks"]).items()}
         doc["stats"] = {k: v for k, v in json.loads(doc["stats"]).items() if isinstance(v, int)}
         doc["headers"] = json.loads(doc["headers"])
         doc["cookies"] = json.loads(doc["cookies"])
         doc["active"] = bool(doc["active"])
-        doc["last_used"] = utc.from_iso(doc["last_used"]) if doc["last_used"] else None
+
+        last_used = doc["last_used"]
+        if isinstance(last_used, str):
+            doc["last_used"] = utc.from_iso(last_used)
+        elif isinstance(last_used, datetime):
+            if last_used.tzinfo is None:
+                doc["last_used"] = last_used.replace(tzinfo=timezone.utc)
+            else:
+                doc["last_used"] = last_used
+
         return Account(**doc)
 
     def to_rs(self):
