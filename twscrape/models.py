@@ -99,6 +99,38 @@ class UserRef(JSONTrait):
 
 
 @dataclass
+class ProfessionalCategory(JSONTrait):
+    id: int
+    name: str
+    icon_name: str
+
+    @staticmethod
+    def parse(obj: dict):
+        return ProfessionalCategory(
+            id=obj["id"],
+            name=obj["name"],
+            icon_name=obj["icon_name"],
+        )
+
+
+@dataclass
+class Professional(JSONTrait):
+    rest_id: str
+    professional_type: str
+    category: list[ProfessionalCategory] = field(default_factory=list)
+
+    @staticmethod
+    def parse(obj: dict):
+        if not obj:
+            return None
+        return Professional(
+            rest_id=obj["rest_id"],
+            professional_type=obj["professional_type"],
+            category=[ProfessionalCategory.parse(x) for x in obj.get("category", [])],
+        )
+
+
+@dataclass
 class User(JSONTrait):
     id: int
     id_str: str
@@ -120,6 +152,7 @@ class User(JSONTrait):
     verified: bool | None = None
     blue: bool | None = None
     blueType: str | None = None
+    professional: Professional | None = None
     descriptionLinks: list[TextLink] = field(default_factory=list)
     pinnedIds: list[int] = field(default_factory=list)
     _type: str = "snscrape.modules.twitter.User"
@@ -130,6 +163,7 @@ class User(JSONTrait):
 
     @staticmethod
     def parse(obj: dict, res=None):
+        print(obj)
         return User(
             id=int(obj["id_str"]),
             id_str=obj["id_str"],
@@ -150,6 +184,9 @@ class User(JSONTrait):
             verified=obj.get("verified"),
             blue=obj.get("is_blue_verified"),
             blueType=obj.get("verified_type"),
+            professional=Professional.parse(obj.get("professional"))
+            if obj.get("professional")
+            else None,
             protected=obj.get("protected"),
             descriptionLinks=_parse_links(obj, ["entities.description.urls", "entities.url.urls"]),
             pinnedIds=[int(x) for x in obj.get("pinned_tweet_ids_str", [])],
