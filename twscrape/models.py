@@ -163,7 +163,6 @@ class User(JSONTrait):
 
     @staticmethod
     def parse(obj: dict, res=None):
-        print(obj)
         return User(
             id=int(obj["id_str"]),
             id_str=obj["id_str"],
