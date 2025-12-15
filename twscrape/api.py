@@ -1,4 +1,3 @@
-import os
 from contextlib import aclosing
 from typing import Literal
 
@@ -21,25 +20,26 @@ from .queue_client import QueueClient
 from .utils import encode_params, find_obj, get_by_path
 
 # OP_{NAME} – {NAME} should be same as second part of GQL ID (required to auto-update script)
-OP_SearchTimeline = "AIdc203rPpK_k_2KWSdm7g/SearchTimeline"
+OP_SearchTimeline = "bshMIjqDk8LTXTq4w91WKw/SearchTimeline"
 OP_UserByRestId = "WJ7rCtezBVT6nk6VM5R8Bw/UserByRestId"
-OP_UserByScreenName = "1VOOyvKkiI3FMmkeDNxM9A/UserByScreenName"
-OP_TweetDetail = "_8aYOgEDz35BrBcBal1-_w/TweetDetail"
-OP_Followers = "Elc_-qTARceHpztqhI9PQA/Followers"
-OP_Following = "C1qZ6bs-L3oc_TKSZyxkXQ/Following"
-OP_Retweeters = "i-CI8t2pJD15euZJErEDrg/Retweeters"
-OP_UserTweets = "HeWHY26ItCfUmm1e6ITjeA/UserTweets"
-OP_UserTweetsAndReplies = "OAx9yEcW3JA9bPo63pcYlA/UserTweetsAndReplies"
-OP_ListLatestTweetsTimeline = "BkauSnPUDQTeeJsxq17opA/ListLatestTweetsTimeline"
-OP_BlueVerifiedFollowers = "ZpmVpf_fBIUgdPErpq2wWg/BlueVerifiedFollowers"
-OP_UserCreatorSubscriptions = "7qcGrVKpcooih_VvJLA1ng/UserCreatorSubscriptions"
-OP_UserMedia = "vFPc2LVIu7so2uA_gHQAdg/UserMedia"
-OP_Bookmarks = "-LGfdImKeQz0xS_jjUwzlA/Bookmarks"
-OP_GenericTimelineById = "CT0YFEFf5GOYa5DJcxM91w/GenericTimelineById"
+OP_UserByScreenName = "-oaLodhGbbnzJBACb1kk2Q/UserByScreenName"
+OP_TweetDetail = "6QzqakNMdh_YzBAR9SYPkQ/TweetDetail"
+OP_Followers = "SCu9fVIlCUm-BM8-tL5pkQ/Followers"
+OP_Following = "S5xUN9s2v4xk50KWGGvyvQ/Following"
+OP_Retweeters = "IQ43ps3iEcdrGV_OL1QaRw/Retweeters"
+OP_UserTweets = "lZRf8IC-GTuGxDwcsHW8aw/UserTweets"
+OP_UserTweetsAndReplies = "gXCeOBFsTOuimuCl1qXimg/UserTweetsAndReplies"
+OP_ListLatestTweetsTimeline = "NRigOCel0QKiWs_GuBgOzw/ListLatestTweetsTimeline"
 OP_AboutAccountQuery = "zs_jFPFT78rBpXv9Z3U2YQ/AboutAccountQuery"
+OP_BlueVerifiedFollowers = "mtuBQZOWziVtBIcSLg6V_g/BlueVerifiedFollowers"
+OP_UserCreatorSubscriptions = "7qcGrVKpcooih_VvJLA1ng/UserCreatorSubscriptions"
+OP_UserMedia = "1D04dx9H2pseMQAbMjXTvQ/UserMedia"
+OP_Bookmarks = "43OUXyQe2KB6BLfli5CFPA/Bookmarks"
+OP_GenericTimelineById = "CT0YFEFf5GOYa5DJcxM91w/GenericTimelineById"
+
 GQL_URL = "https://x.com/i/api/graphql"
 GQL_FEATURES = {  # search values here (view source) https://x.com/
-    "articles_preview_enabled": False,
+    "articles_preview_enabled": True,
     "c9s_tweet_anatomy_moderator_badge_enabled": True,
     "communities_web_enable_tweet_community_results_fetch": True,
     "creator_subscriptions_quote_tweet_preview_enabled": False,
@@ -49,32 +49,30 @@ GQL_FEATURES = {  # search values here (view source) https://x.com/
     "longform_notetweets_consumption_enabled": True,
     "longform_notetweets_inline_media_enabled": True,
     "longform_notetweets_rich_text_read_enabled": True,
+    "premium_content_api_read_enabled": False,
+    "profile_label_improvements_pcf_label_in_post_enabled": True,
     "responsive_web_edit_tweet_api_enabled": True,
     "responsive_web_enhance_cards_enabled": False,
-    "responsive_web_graphql_exclude_directive_enabled": True,
     "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
     "responsive_web_graphql_timeline_navigation_enabled": True,
-    "responsive_web_media_download_video_enabled": False,
+    "responsive_web_grok_analysis_button_from_backend": True,
+    "responsive_web_grok_analyze_button_fetch_trends_enabled": False,
+    "responsive_web_grok_analyze_post_followups_enabled": True,
+    "responsive_web_grok_community_note_auto_translation_is_enabled": False,
+    "responsive_web_grok_image_annotation_enabled": True,
+    "responsive_web_grok_imagine_annotation_enabled": True,
+    "responsive_web_grok_share_attachment_enabled": True,
+    "responsive_web_grok_show_grok_translated_post": True,
+    "responsive_web_jetfuel_frame": True,
+    "responsive_web_profile_redirect_enabled": False,
     "responsive_web_twitter_article_tweet_consumption_enabled": True,
     "rweb_tipjar_consumption_enabled": True,
-    "rweb_video_timestamps_enabled": True,
+    "rweb_video_screen_enabled": False,
     "standardized_nudges_misinfo": True,
     "tweet_awards_web_tipping_enabled": False,
     "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
-    "tweet_with_visibility_results_prefer_gql_media_interstitial_enabled": False,
-    "tweetypie_unmention_optimization_enabled": True,
     "verified_phone_label_enabled": False,
     "view_counts_everywhere_api_enabled": True,
-    "responsive_web_grok_analyze_button_fetch_trends_enabled": False,
-    "premium_content_api_read_enabled": False,
-    "profile_label_improvements_pcf_label_in_post_enabled": False,
-    "responsive_web_grok_share_attachment_enabled": False,
-    "responsive_web_grok_analyze_post_followups_enabled": False,
-    "responsive_web_grok_image_annotation_enabled": False,
-    "responsive_web_grok_analysis_button_from_backend": False,
-    "responsive_web_jetfuel_frame": False,
-    "rweb_video_screen_enabled": True,
-    "responsive_web_grok_show_grok_translated_post": True,
 }
 
 KV = dict | None
@@ -128,8 +126,7 @@ class API:
     ):
         queue, cur, cnt, active = op.split("/")[-1], None, 0, True
         kv, ft = {**kv}, {**GQL_FEATURES, **(ft or {})}
-        if os.getenv("INITALIZED_CURSOR") is not None:
-            cur = os.getenv("INITALIZED_CURSOR")
+
         async with QueueClient(self.pool, queue, self.debug, proxy=self.proxy) as client:
             while active:
                 params = {"variables": kv, "features": ft}
@@ -178,6 +175,7 @@ class API:
             "count": 20,
             "product": "Latest",
             "querySource": "typed_query",
+            "withGrokTranslatedBio": False,
             **(kv or {}),
         }
         async with aclosing(self._gql_items(op, kv, limit=limit)) as gen:
@@ -221,17 +219,21 @@ class API:
 
     async def user_by_login_raw(self, login: str, kv: KV = None):
         op = OP_UserByScreenName
-        kv = {"screen_name": login, "withSafetyModeUserFields": True, **(kv or {})}
+        kv = {"screen_name": login, "withGrokTranslatedBio": True, **(kv or {})}
         ft = {
-            "highlights_tweets_tab_ui_enabled": True,
-            "hidden_profile_likes_enabled": True,
-            "creator_subscriptions_tweet_preview_api_enabled": True,
             "hidden_profile_subscriptions_enabled": True,
+            "profile_label_improvements_pcf_label_in_post_enabled": True,
+            "responsive_web_profile_redirect_enabled": False,
+            "rweb_tipjar_consumption_enabled": True,
+            "verified_phone_label_enabled": False,
+            "subscriptions_verification_info_is_identity_verified_enabled": True,
             "subscriptions_verification_info_verified_since_enabled": True,
-            "subscriptions_verification_info_is_identity_verified_enabled": False,
-            "responsive_web_twitter_article_notes_tab_enabled": False,
-            "subscriptions_feature_can_gift_premium": False,
-            "profile_label_improvements_pcf_label_in_post_enabled": False,
+            "highlights_tweets_tab_ui_enabled": True,
+            "responsive_web_twitter_article_notes_tab_enabled": True,
+            "subscriptions_feature_can_gift_premium": True,
+            "creator_subscriptions_tweet_preview_api_enabled": True,
+            "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+            "responsive_web_graphql_timeline_navigation_enabled": True,
         }
         return await self._gql_item(op, kv, ft)
 
@@ -245,13 +247,12 @@ class API:
         op = OP_TweetDetail
         kv = {
             "focalTweetId": str(twid),
-            "with_rux_injections": True,
+            "with_rux_injections": False,
             "includePromotedContent": True,
             "withCommunity": True,
             "withQuickPromoteEligibilityTweetFields": True,
             "withBirdwatchNotes": True,
             "withVoice": True,
-            "withV2Timeline": True,
             **(kv or {}),
         }
         return await self._gql_item(op, kv)
@@ -268,13 +269,12 @@ class API:
         kv = {
             "focalTweetId": str(twid),
             "referrer": "tweet",
-            "with_rux_injections": True,
+            "with_rux_injections": False,
             "includePromotedContent": True,
             "withCommunity": True,
             "withQuickPromoteEligibilityTweetFields": True,
             "withBirdwatchNotes": True,
             "withVoice": True,
-            "withV2Timeline": True,
             **(kv or {}),
         }
         async with aclosing(
@@ -294,9 +294,14 @@ class API:
 
     async def followers_raw(self, uid: int, limit=-1, kv: KV = None):
         op = OP_Followers
-        kv = {"userId": str(uid), "count": 20, "includePromotedContent": False, **(kv or {})}
-        ft = {"responsive_web_twitter_article_notes_tab_enabled": False}
-        async with aclosing(self._gql_items(op, kv, limit=limit, ft=ft)) as gen:
+        kv = {
+            "userId": str(uid),
+            "count": 20,
+            "includePromotedContent": False,
+            "withGrokTranslatedBio": False,
+            **(kv or {}),
+        }
+        async with aclosing(self._gql_items(op, kv, limit=limit)) as gen:
             async for x in gen:
                 yield x
 
@@ -310,11 +315,14 @@ class API:
 
     async def verified_followers_raw(self, uid: int, limit=-1, kv: KV = None):
         op = OP_BlueVerifiedFollowers
-        kv = {"userId": str(uid), "count": 20, "includePromotedContent": False, **(kv or {})}
-        ft = {
-            "responsive_web_twitter_article_notes_tab_enabled": True,
+        kv = {
+            "userId": str(uid),
+            "count": 20,
+            "includePromotedContent": False,
+            "withGrokTranslatedBio": False,
+            **(kv or {}),
         }
-        async with aclosing(self._gql_items(op, kv, limit=limit, ft=ft)) as gen:
+        async with aclosing(self._gql_items(op, kv, limit=limit)) as gen:
             async for x in gen:
                 yield x
 
@@ -328,7 +336,13 @@ class API:
 
     async def following_raw(self, uid: int, limit=-1, kv: KV = None):
         op = OP_Following
-        kv = {"userId": str(uid), "count": 20, "includePromotedContent": False, **(kv or {})}
+        kv = {
+            "userId": str(uid),
+            "count": 20,
+            "includePromotedContent": False,
+            "withGrokTranslatedBio": False,
+            **(kv or {}),
+        }
         async with aclosing(self._gql_items(op, kv, limit=limit)) as gen:
             async for x in gen:
                 yield x
@@ -358,7 +372,13 @@ class API:
 
     async def retweeters_raw(self, twid: int, limit=-1, kv: KV = None):
         op = OP_Retweeters
-        kv = {"tweetId": str(twid), "count": 20, "includePromotedContent": True, **(kv or {})}
+        kv = {
+            "tweetId": str(twid),
+            "count": 20,
+            "enableRanking": True,
+            "includePromotedContent": True,
+            **(kv or {}),
+        }
         async with aclosing(self._gql_items(op, kv, limit=limit)) as gen:
             async for x in gen:
                 yield x
@@ -379,7 +399,6 @@ class API:
             "includePromotedContent": True,
             "withQuickPromoteEligibilityTweetFields": True,
             "withVoice": True,
-            "withV2Timeline": True,
             **(kv or {}),
         }
         async with aclosing(self._gql_items(op, kv, limit=limit)) as gen:
@@ -402,7 +421,6 @@ class API:
             "includePromotedContent": True,
             "withCommunity": True,
             "withVoice": True,
-            "withV2Timeline": True,
             **(kv or {}),
         }
         async with aclosing(self._gql_items(op, kv, limit=limit)) as gen:
@@ -426,7 +444,6 @@ class API:
             "withClientEventToken": False,
             "withBirdwatchNotes": False,
             "withVoice": True,
-            "withV2Timeline": True,
             **(kv or {}),
         }
 
@@ -507,17 +524,10 @@ class API:
         op = OP_Bookmarks
         kv = {
             "count": 20,
-            "includePromotedContent": False,
-            "withClientEventToken": False,
-            "withBirdwatchNotes": False,
-            "withVoice": True,
-            "withV2Timeline": True,
+            "includePromotedContent": True,
             **(kv or {}),
         }
-        ft = {
-            "graphql_timeline_v2_bookmark_timeline": True,
-        }
-        async with aclosing(self._gql_items(op, kv, ft, limit=limit)) as gen:
+        async with aclosing(self._gql_items(op, kv, limit=limit)) as gen:
             async for x in gen:
                 yield x
 
