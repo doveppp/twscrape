@@ -11,7 +11,8 @@ from .utils import utc
 
 TOKEN = "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
 GLOBAL_TRANSPORT = AsyncHTTPTransport(
-    retries=3, limits=Limits(max_connections=100, keepalive_expiry=30)
+    retries=3,
+    limits=Limits(max_connections=100, max_keepalive_connections=100, keepalive_expiry=30),
 )
 
 
