@@ -24,22 +24,40 @@ class AbortReqError(Exception): ...
 
 class XClIdGenStore:
     items: dict[str, XClIdGen] = {}  # username -> XClIdGen
+    reserve: dict[str, XClIdGen] = {}  # username -> XClIdGen
 
     @classmethod
     async def get(cls, username: str, fresh=False) -> XClIdGen:
         if username in cls.items and not fresh:
+            logger.debug(f"get XClIdGen for {username} from cache")
             return cls.items[username]
+        if username in cls.reserve:
+            logger.debug(f"get XClIdGen for {username} from cache2")
+            cls.items[username] = cls.reserve[username]
+            asyncio.create_task(cls.fresh(username))
+            return cls.items[username]
+        logger.debug(f"fresh XClIdGen for {username}")
+        gen = await cls.fresh(username)
+        cls.items[username] = gen
 
+        asyncio.create_task(cls.fresh(username))
+        return gen
+        # raise AbortReqError(
+        #     "Faield to create XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
+        # )
+
+    @classmethod
+    async def fresh(cls, username: str) -> XClIdGen:
         tries = 0
         while tries < 3:
             try:
                 clid_gen = await XClIdGen.create()
-                cls.items[username] = clid_gen
+                cls.reserve[username] = clid_gen
+                logger.debug(f"get new XClIdGen for {username}")
                 return clid_gen
             except httpx.HTTPStatusError:
                 tries += 1
                 await asyncio.sleep(1)
-
         raise AbortReqError(
             "Faield to create XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
         )
