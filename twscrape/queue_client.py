@@ -69,7 +69,7 @@ class Ctx:
 
             tries += 1
             logger.debug(f"Retrying request with new x-client-transaction-id: {url}")
-            await asyncio.sleep(1)
+            # await asyncio.sleep(1)
 
         raise AbortReqError(
             "Faield to get XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
@@ -135,7 +135,7 @@ class QueueClient:
 
         ctx, self.ctx, self.req_count = self.ctx, None, 0
         username = ctx.acc.username
-        
+
         # if inactive or reset_at > 0:
         #     print(f"Closing client for {username}")
         #     await ctx.aclose()
