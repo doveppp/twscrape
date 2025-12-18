@@ -99,6 +99,11 @@ class API:
 
         self.proxy = proxy
         self.debug = debug
+        self.queue_client_dict = {
+            "SearchTimeline": QueueClient(
+                self.pool, "SearchTimeline", self.debug, proxy=self.proxy
+            ),
+        }
         if self.debug:
             set_log_level("DEBUG")
 
@@ -126,38 +131,42 @@ class API:
     ):
         queue, cur, cnt, active = op.split("/")[-1], None, 0, True
         kv, ft = {**kv}, {**GQL_FEATURES, **(ft or {})}
+        if queue not in ("SearchTimeline", "ListLatestTweetsTimeline"):
+            raise ValueError(f"Invalid queue: {queue}")
+        if queue not in self.queue_client_dict:
+            self.queue_client_dict[queue] = QueueClient(
+                self.pool, queue, self.debug, proxy=self.proxy
+            )
+        queue_client = self.queue_client_dict[queue]
+        while active:
+            params = {"variables": kv, "features": ft}
+            if cur is not None:
+                params["variables"]["cursor"] = cur
+            if queue in ("SearchTimeline", "ListLatestTweetsTimeline"):
+                params["fieldToggles"] = {"withArticleRichContentState": False}
+            if queue in ("UserMedia",):
+                params["fieldToggles"] = {"withArticlePlainText": False}
 
-        async with QueueClient(self.pool, queue, self.debug, proxy=self.proxy) as client:
-            while active:
-                params = {"variables": kv, "features": ft}
-                if cur is not None:
-                    params["variables"]["cursor"] = cur
-                if queue in ("SearchTimeline", "ListLatestTweetsTimeline"):
-                    params["fieldToggles"] = {"withArticleRichContentState": False}
-                if queue in ("UserMedia",):
-                    params["fieldToggles"] = {"withArticlePlainText": False}
+            rep = await queue_client.get(f"{GQL_URL}/{op}", params=encode_params(params))
+            if rep is None:
+                return
 
-                rep = await client.get(f"{GQL_URL}/{op}", params=encode_params(params))
-                if rep is None:
-                    return
+            obj = rep.json()
+            els = get_by_path(obj, "entries") or []
+            els = [
+                x
+                for x in els
+                if not (
+                    x["entryId"].startswith("cursor-") or x["entryId"].startswith("messageprompt-")
+                )
+            ]
+            cur = self._get_cursor(obj, cursor_type)
 
-                obj = rep.json()
-                els = get_by_path(obj, "entries") or []
-                els = [
-                    x
-                    for x in els
-                    if not (
-                        x["entryId"].startswith("cursor-")
-                        or x["entryId"].startswith("messageprompt-")
-                    )
-                ]
-                cur = self._get_cursor(obj, cursor_type)
+            rep, cnt, active = self._is_end(rep, queue, els, cur, cnt, limit)
+            if rep is None:
+                return
 
-                rep, cnt, active = self._is_end(rep, queue, els, cur, cnt, limit)
-                if rep is None:
-                    return
-
-                yield rep
+            yield rep
 
     async def _gql_item(self, op: str, kv: dict, ft: dict | None = None):
         ft = ft or {}
