@@ -24,43 +24,99 @@ class AbortReqError(Exception): ...
 
 class XClIdGenStore:
     items: dict[str, XClIdGen] = {}  # username -> XClIdGen
-    reserve: dict[str, XClIdGen] = {}  # username -> XClIdGen
+    pool: list[XClIdGen] = []  # 预创建的 XClIdGen 池
+    pool_size: int = 5  # 池的目标大小
+    _pool_lock: asyncio.Lock = asyncio.Lock()
+    _initialized: bool = False
+
+    @classmethod
+    async def _ensure_pool_initialized(cls):
+        """确保池已初始化"""
+        if cls._initialized:
+            return
+
+        async with cls._pool_lock:
+            if cls._initialized:
+                return
+
+            logger.debug(f"初始化 XClIdGen 池，目标大小: {cls.pool_size}")
+            await cls._fill_pool()
+            cls._initialized = True
+
+    @classmethod
+    async def _fill_pool(cls):
+        """补充池到目标大小"""
+        current_size = len(cls.pool)
+        if current_size >= cls.pool_size:
+            return
+
+        needed = cls.pool_size - current_size
+        if needed == cls.pool_size:
+            needed = 30
+            logger.debug("初始化 XClIdGen 池:  %d", needed)
+        else:
+            logger.debug(f"补充 XClIdGen 池: 当前 {current_size}, 需要 {needed}")
+
+        for i in range(needed):
+            tries = 0
+            while tries < 3:
+                try:
+                    clid_gen = await XClIdGen.create()
+                    cls.pool.append(clid_gen)
+                    logger.debug(
+                        f"成功创建 XClIdGen [{i + 1}/{needed}] 当前池大小: {len(cls.pool)}"
+                    )
+                    break
+                except httpx.HTTPStatusError as e:
+                    tries += 1
+                    logger.warning(f"创建 XClIdGen 失败 (尝试 {tries}/3): {e}")
+                    if tries < 3:
+                        await asyncio.sleep(1)
+                    else:
+                        logger.error("创建 XClIdGen 失败，已达最大重试次数")
 
     @classmethod
     async def get(cls, username: str, fresh=False) -> XClIdGen:
+        """获取 XClIdGen，优先从缓存获取，否则从池中分配"""
+        # 确保池已初始化
+        await cls._ensure_pool_initialized()
+
+        # 如果 username 已有缓存且不需要刷新，直接返回
         if username in cls.items and not fresh:
-            logger.debug(f"get XClIdGen for {username} from cache")
+            logger.debug(f"从缓存获取 {username} 的 XClIdGen")
             return cls.items[username]
-        if username in cls.reserve:
-            logger.debug(f"get XClIdGen for {username} from cache2")
-            cls.items[username] = cls.reserve[username]
-            asyncio.create_task(cls.fresh(username))
-            return cls.items[username]
-        logger.debug(f"fresh XClIdGen for {username}")
-        gen = await cls.fresh(username)
-        cls.items[username] = gen
 
-        asyncio.create_task(cls.fresh(username))
-        return gen
-        # raise AbortReqError(
-        #     "Faield to create XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
-        # )
+        # 从池中获取一个 XClIdGen
+        async with cls._pool_lock:
+            if not cls.pool:
+                # 池空了，立即创建一个
+                logger.warning(f"XClIdGen 池为空，立即创建新的")
+                tries = 0
+                while tries < 3:
+                    try:
+                        clid_gen = await XClIdGen.create()
+                        cls.items[username] = clid_gen
+                        # 异步补充池
+                        asyncio.create_task(cls._fill_pool())
+                        return clid_gen
+                    except httpx.HTTPStatusError:
+                        tries += 1
+                        if tries < 3:
+                            await asyncio.sleep(1)
 
-    @classmethod
-    async def fresh(cls, username: str) -> XClIdGen:
-        tries = 0
-        while tries < 3:
-            try:
-                clid_gen = await XClIdGen.create()
-                cls.reserve[username] = clid_gen
-                logger.debug(f"get new XClIdGen for {username}")
-                return clid_gen
-            except httpx.HTTPStatusError:
-                tries += 1
-                await asyncio.sleep(1)
-        raise AbortReqError(
-            "Faield to create XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
-        )
+                raise AbortReqError(
+                    "Failed to create XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
+                )
+
+            # 从池中取出一个
+            clid_gen = cls.pool.pop(0)
+            cls.items[username] = clid_gen
+            logger.debug(f"从池中分配 XClIdGen 给 {username}，池剩余: {len(cls.pool)}")
+
+        # 异步补充池
+        asyncio.create_task(cls._fill_pool())
+
+        return clid_gen
 
 
 class Ctx:
