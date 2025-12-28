@@ -131,8 +131,6 @@ class API:
     ):
         queue, cur, cnt, active = op.split("/")[-1], None, 0, True
         kv, ft = {**kv}, {**GQL_FEATURES, **(ft or {})}
-        if queue not in ("SearchTimeline", "ListLatestTweetsTimeline"):
-            raise ValueError(f"Invalid queue: {queue}")
         if queue not in self.queue_client_dict:
             self.queue_client_dict[queue] = QueueClient(
                 self.pool, queue, self.debug, proxy=self.proxy
