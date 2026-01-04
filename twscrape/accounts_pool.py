@@ -147,8 +147,8 @@ class AccountsPool:
         cols = list(data.keys())
 
         qs = f"""
-        INSERT INTO accounts ({",".join(cols)}) VALUES ({",".join([f"%({x})s" for x in cols])})
-        ON DUPLICATE KEY UPDATE {",".join([f"{x}=VALUES({x})" for x in cols])}
+        INSERT INTO accounts ({",".join(cols)}) VALUES ({",".join([f"%({x})s" for x in cols])}) AS new
+        ON DUPLICATE KEY UPDATE {",".join([f"{x}=new.{x}" for x in cols])}
         """
         await execute(self._db_file, qs, data)
 
