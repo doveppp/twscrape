@@ -790,22 +790,39 @@ def _parse_items(rep: httpx.Response, kind: str, limit: int = -1):
     res = rep if isinstance(rep, dict) else rep.json()
     obj = to_old_rep(res)
 
+    entry_ids = obj.get("entry_ids", [])
     ids = set()
-    for x in obj[key].values():
-        if limit != -1 and len(ids) >= limit:
-            # todo: move somewhere in configuration like force_limit
-            # https://github.com/vladkens/twscrape/issues/26#issuecomment-1656875132
-            # break
-            pass
 
-        try:
-            tmp = Cls.parse(x, obj)
-            if tmp.id not in ids:
-                ids.add(tmp.id)
-                yield tmp
-        except Exception as e:
-            _write_dump(kind, e, x, obj)
-            continue
+    if entry_ids:
+        for rid in entry_ids:
+            if rid not in obj[key]:
+                continue
+
+            if limit != -1 and len(ids) >= limit:
+                break
+
+            x = obj[key][rid]
+            try:
+                tmp = Cls.parse(x, obj)
+                if tmp.id not in ids:
+                    ids.add(tmp.id)
+                    yield tmp
+            except Exception as e:
+                _write_dump(kind, e, x, obj)
+                continue
+    else:
+        for x in obj[key].values():
+            if limit != -1 and len(ids) >= limit:
+                break
+
+            try:
+                tmp = Cls.parse(x, obj)
+                if tmp.id not in ids:
+                    ids.add(tmp.id)
+                    yield tmp
+            except Exception as e:
+                _write_dump(kind, e, x, obj)
+                continue
 
 
 # public helpers
