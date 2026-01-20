@@ -155,7 +155,12 @@ def to_old_rep(obj: dict) -> dict[str, Any]:
     entry_ids = []
     for x in entries:
         eid = x.get("entryId", "")
-        if eid.startswith("tweet-") or eid.startswith("user-") or eid.startswith("trend-"):
+        if (
+            eid.startswith("tweet-")
+            or eid.startswith("user-")
+            or eid.startswith("trend-")
+            or eid.startswith("conversationthread-")
+        ):
             entry_ids.append(eid.split("-", 1)[-1])
 
     return {"tweets": {**tw1, **tw2}, "users": users, "trends": trends, "entry_ids": entry_ids}
