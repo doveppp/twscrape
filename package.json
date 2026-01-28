@@ -1,0 +1,58 @@
+{
+  "name": "twscrape",
+  "version": "0.17.0",
+  "description": "Twitter GraphQL and Search API implementation with SNScrape data models",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "twscrape": "dist/cli.js"
+  },
+  "directories": {
+    "example": "examples",
+    "test": "tests"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "test": "jest",
+    "lint": "eslint src/**/*.ts",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "twitter",
+    "scrape",
+    "scrapper",
+    "api",
+    "snscrape",
+    "typescript"
+  ],
+  "author": "vladkens <v.pronsky@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vladkens/twscrape"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^24.10.1",
+    "@typescript-eslint/eslint-plugin": "^8.47.0",
+    "@typescript-eslint/parser": "^8.47.0",
+    "eslint": "^9.39.1",
+    "jest": "^30.2.0",
+    "prettier": "^3.6.2",
+    "ts-jest": "^29.4.5",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "axios": "^1.13.2",
+    "better-sqlite3": "^12.4.1",
+    "cheerio": "^1.1.2",
+    "fake-useragent": "^1.0.1",
+    "otplib": "^12.0.1"
+  }
+}
