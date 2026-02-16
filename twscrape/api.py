@@ -150,6 +150,10 @@ class API:
                         x["entryId"].startswith("cursor-")
                         or x["entryId"].startswith("messageprompt-")
                     )
+                    and (
+                        x.get("content", {}).get("items")
+                        or x.get("content", {}).get("itemContent")
+                    )
                 ]
                 cur = self._get_cursor(obj, cursor_type)
 
@@ -277,9 +281,7 @@ class API:
             "withVoice": True,
             **(kv or {}),
         }
-        async with aclosing(
-            self._gql_items(op, kv, limit=limit, cursor_type="ShowMoreThreads")
-        ) as gen:
+        async with aclosing(self._gql_items(op, kv, limit=limit, cursor_type="Bottom")) as gen:
             async for x in gen:
                 yield x
 
