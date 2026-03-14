@@ -20,9 +20,9 @@ from .queue_client import QueueClient
 from .utils import encode_params, find_obj, get_by_path
 
 # OP_{NAME} – {NAME} should be same as second part of GQL ID (required to auto-update script)
-OP_SearchTimeline = "bshMIjqDk8LTXTq4w91WKw/SearchTimeline"
+OP_SearchTimeline = "z_yqhtrZVEuFEUhYsDyzOg/SearchTimeline"
 OP_UserByRestId = "WJ7rCtezBVT6nk6VM5R8Bw/UserByRestId"
-OP_UserByScreenName = "-oaLodhGbbnzJBACb1kk2Q/UserByScreenName"
+OP_UserByScreenName = "pLsOiyHJ1eFwPJlNmLp4Bg/UserByScreenName"
 OP_TweetDetail = "6QzqakNMdh_YzBAR9SYPkQ/TweetDetail"
 OP_Followers = "SCu9fVIlCUm-BM8-tL5pkQ/Followers"
 OP_Following = "S5xUN9s2v4xk50KWGGvyvQ/Following"
@@ -126,7 +126,6 @@ class API:
     ):
         queue, cur, cnt, active = op.split("/")[-1], None, 0, True
         kv, ft = {**kv}, {**GQL_FEATURES, **(ft or {})}
-
         async with QueueClient(self.pool, queue, self.debug, proxy=self.proxy) as client:
             while active:
                 params = {"variables": kv, "features": ft}
@@ -136,13 +135,14 @@ class API:
                     params["fieldToggles"] = {"withArticleRichContentState": False}
                 if queue in ("UserMedia",):
                     params["fieldToggles"] = {"withArticlePlainText": False}
-
                 rep = await client.get(f"{GQL_URL}/{op}", params=encode_params(params))
                 if rep is None:
                     return
 
                 obj = rep.json()
                 els = get_by_path(obj, "entries") or []
+                cur = self._get_cursor({"e": els}, cursor_type)
+
                 els = [
                     x
                     for x in els
@@ -155,7 +155,6 @@ class API:
                         or x.get("content", {}).get("itemContent")
                     )
                 ]
-                cur = self._get_cursor(obj, cursor_type)
 
                 rep, cnt, active = self._is_end(rep, queue, els, cur, cnt, limit)
                 if rep is None:

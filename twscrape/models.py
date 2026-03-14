@@ -145,6 +145,18 @@ class UserRef(JSONTrait):
 
 
 @dataclass
+class VerificationInfo(JSONTrait):
+    verified: bool
+    verified_type: str
+
+    @staticmethod
+    def parse(obj: dict):
+        return VerificationInfo(
+            verified=obj.get("verified", False), verified_type=obj.get("verified_type", None)
+        )
+
+
+@dataclass
 class User(JSONTrait):
     id: int
     id_str: str
@@ -168,6 +180,7 @@ class User(JSONTrait):
     blueType: str | None = None
     descriptionLinks: list[TextLink] = field(default_factory=list)
     pinnedIds: list[int] = field(default_factory=list)
+    verification: VerificationInfo | None = None
     _type: str = "snscrape.modules.twitter.User"
 
     # todo:
@@ -202,7 +215,6 @@ class User(JSONTrait):
         protected = legacy.get("protected") or obj.get("protected")
         entities = legacy.get("entities") or obj.get("entities", {})
         pinned_ids = legacy.get("pinned_tweet_ids_str") or obj.get("pinned_tweet_ids_str", [])
-
         # is_blue_verified is at top level in new format
         blue = obj.get("is_blue_verified")
         blue_type = obj.get("verified_type")
@@ -232,6 +244,7 @@ class User(JSONTrait):
                 {"entities": entities}, ["entities.description.urls", "entities.url.urls"]
             ),
             pinnedIds=[int(x) for x in pinned_ids],
+            verification=VerificationInfo.parse(obj.get("verification", {})),
         )
 
 
