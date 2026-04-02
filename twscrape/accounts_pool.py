@@ -45,6 +45,11 @@ class AccountsPool:
         self._login_config = login_config or LoginConfig()
         self._raise_when_no_account = raise_when_no_account
 
+    @staticmethod
+    def _json_path(queue: str):
+        queue = queue.replace('"', '\\"')
+        return f'$."{queue}"'
+
     async def load_from_file(self, filepath: str, line_format: str):
         line_delim = guess_delim(line_format)
         tokens = line_format.split(line_delim)
@@ -196,6 +201,7 @@ class AccountsPool:
         UPDATE accounts SET
             active = 0,
             locks = json_object(),
+            _tx = NULL,
             last_used = NULL,
             error_msg = NULL,
             headers = json_object(),
@@ -213,7 +219,7 @@ class AccountsPool:
         await self.relogin([x["username"] for x in rs])
 
     async def reset_locks(self):
-        qs = "UPDATE accounts SET locks = json_object()"
+        qs = "UPDATE accounts SET locks = json_object(), _tx = NULL"
         await execute(self._db_file, qs)
 
     async def set_active(self, username: str, active: bool):
@@ -222,68 +228,58 @@ class AccountsPool:
         qs = "UPDATE accounts SET active = %(active)s WHERE username = %(username)s"
         await execute(self._db_file, qs, {"username": username, "active": active_val})
 
-    async def lock_until(self, username: str, queue: str, unlock_at: int, req_count=0):
+    async def lock_until(
+        self, username: str, queue: str, unlock_at: int, req_count=0, tx: str | None = None
+    ):
+        queue_path = self._json_path(queue)
         qs = f"""
         UPDATE accounts SET
-            locks = JSON_SET(locks, '$.{queue}', FROM_UNIXTIME({unlock_at})),
-            stats = JSON_SET(stats, '$.{queue}', COALESCE(JSON_EXTRACT(stats, '$.{queue}'), 0) + {req_count}),
+            locks = JSON_SET(locks, '{queue_path}', FROM_UNIXTIME({unlock_at})),
+            stats = JSON_SET(stats, '{queue_path}', COALESCE(JSON_EXTRACT(stats, '{queue_path}'), 0) + {req_count}),
             last_used = FROM_UNIXTIME({utc.ts()})
         WHERE username = %(username)s
         """
-        await execute(self._db_file, qs, {"username": username})
+        params = {"username": username}
+        if tx is not None:
+            qs += " AND _tx = %(tx)s"
+            params["tx"] = tx
+        await execute(self._db_file, qs, params)
 
-    async def unlock(self, username: str, queue: str, req_count=0):
+    async def unlock(self, username: str, queue: str, req_count=0, tx: str | None = None):
+        queue_path = self._json_path(queue)
         qs = f"""
         UPDATE accounts SET
-            locks = JSON_REMOVE(locks, '$.{queue}'),
-            stats = JSON_SET(stats, '$.{queue}', COALESCE(JSON_EXTRACT(stats, '$.{queue}'), 0) + {req_count}),
-            last_used = FROM_UNIXTIME({utc.ts()})
+            locks = JSON_REMOVE(locks, '{queue_path}'),
+            stats = JSON_SET(stats, '{queue_path}', COALESCE(JSON_EXTRACT(stats, '{queue_path}'), 0) + {req_count}),
+            last_used = FROM_UNIXTIME({utc.ts()}),
+            _tx = NULL
         WHERE username = %(username)s
         """
-        await execute(self._db_file, qs, {"username": username})
-
-    async def _get_and_lock(self, queue: str, condition: str):
-        # if space in condition, it's a subquery, otherwise it's username
-        is_subquery = " " in condition
-
-        if is_subquery:
-            # Execute subquery directly to get username
-            qs_select = condition
-        else:
-            # Simple username lookup
-            qs_select = f"SELECT username FROM accounts WHERE username = '{condition}' LIMIT 1"
-
-        res = await fetchone(self._db_file, qs_select)
-        if not res:
-            return None
-        username = res["username"]
-
-        # Lock the account
-        qs_update = f"""
-        UPDATE accounts SET
-            locks = JSON_SET(locks, '$.{queue}', DATE_ADD(NOW(), INTERVAL 15 MINUTE)),
-            last_used = NOW()
-        WHERE username = '{username}'
-        """
-        await execute(self._db_file, qs_update)
-
-        # Get full account data
-        qs_get = f"SELECT * FROM accounts WHERE username = '{username}'"
-        rs = await fetchone(self._db_file, qs_get)
-        return Account.from_rs(rs) if rs else None
+        params = {"username": username}
+        if tx is not None:
+            qs += " AND _tx = %(tx)s"
+            params["tx"] = tx
+        await execute(self._db_file, qs, params)
 
     async def get_for_queue(self, queue: str):
-        # Build query to find available account
+        queue_path = self._json_path(queue)
+        tx = str(uuid.uuid4())
         qs = f"""
-        SELECT username FROM accounts
+        UPDATE accounts
+        SET
+            locks = JSON_SET(locks, '{queue_path}', DATE_ADD(NOW(), INTERVAL 15 MINUTE)),
+            last_used = NOW(),
+            _tx = %(tx)s
         WHERE active = 1 
           AND (locks IS NULL 
-               OR JSON_EXTRACT(locks, '$.{queue}') IS NULL 
-               OR JSON_EXTRACT(locks, '$.{queue}') < NOW())
+               OR JSON_EXTRACT(locks, '{queue_path}') IS NULL 
+               OR JSON_EXTRACT(locks, '{queue_path}') < NOW())
         ORDER BY {self._order_by}
         LIMIT 1
         """
-        return await self._get_and_lock(queue, qs)
+        await execute(self._db_file, qs, {"tx": tx})
+        rs = await fetchone(self._db_file, "SELECT * FROM accounts WHERE _tx = %(tx)s", {"tx": tx})
+        return Account.from_rs(rs) if rs else None
 
     async def get_for_queue_or_wait(self, queue: str) -> Account | None:
         msg_shown = False
@@ -312,10 +308,11 @@ class AccountsPool:
             return account
 
     async def next_available_at(self, queue: str):
+        queue_path = self._json_path(queue)
         qs = f"""
-        SELECT JSON_EXTRACT(locks, '$."{queue}"') as lock_until
+        SELECT JSON_EXTRACT(locks, '{queue_path}') as lock_until
         FROM accounts
-        WHERE active = 1 AND JSON_EXTRACT(locks, '$."{queue}"') IS NOT NULL
+        WHERE active = 1 AND JSON_EXTRACT(locks, '{queue_path}') IS NOT NULL
         ORDER BY lock_until ASC
         LIMIT 1
         """
@@ -348,12 +345,16 @@ class AccountsPool:
 
         return None
 
-    async def mark_inactive(self, username: str, error_msg: str | None):
+    async def mark_inactive(self, username: str, error_msg: str | None, tx: str | None = None):
         qs = """
-        UPDATE accounts SET active = 0, error_msg = %(error_msg)s
+        UPDATE accounts SET active = 0, error_msg = %(error_msg)s, _tx = NULL
         WHERE username = %(username)s
         """
-        await execute(self._db_file, qs, {"username": username, "error_msg": error_msg})
+        params = {"username": username, "error_msg": error_msg}
+        if tx is not None:
+            qs += " AND _tx = %(tx)s"
+            params["tx"] = tx
+        await execute(self._db_file, qs, params)
 
     async def stats(self):
         qs = "SELECT locks FROM accounts WHERE locks IS NOT NULL"
@@ -374,10 +375,11 @@ class AccountsPool:
         gql_ops = list(keys)
 
         def locks_count(queue):
+            queue_path = self._json_path(queue)
             return f"""
             SELECT COUNT(*) FROM accounts
-            WHERE JSON_EXTRACT(locks, '$.{queue}') IS NOT NULL
-                AND JSON_EXTRACT(locks, '$.{queue}') > NOW()
+            WHERE JSON_EXTRACT(locks, '{queue_path}') IS NOT NULL
+                AND JSON_EXTRACT(locks, '{queue_path}') > NOW()
             """
 
         config = [

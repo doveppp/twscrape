@@ -3,16 +3,23 @@ import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 
+import httpx
 from httpx import AsyncClient, AsyncHTTPTransport
 from httpx._config import Limits
 
 from .models import JSONTrait
 from .utils import utc
 
+
+class MyAsyncHTTPTransport(httpx.AsyncHTTPTransport):
+    async def aclose(self):
+        return
+
+
 TOKEN = "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
-GLOBAL_TRANSPORT = AsyncHTTPTransport(
+GLOBAL_TRANSPORT = MyAsyncHTTPTransport(
     retries=3,
-    limits=Limits(max_connections=100, max_keepalive_connections=100, keepalive_expiry=30),
+    limits=Limits(max_connections=50, max_keepalive_connections=50, keepalive_expiry=30),
 )
 
 
@@ -69,7 +76,6 @@ class Account(JSONTrait):
         proxy = proxies[0] if proxies else None
 
         client = AsyncClient(proxy=proxy, follow_redirects=True, transport=GLOBAL_TRANSPORT)
-
         # saved from previous usage
         client.cookies.update(self.cookies)
         client.headers.update(self.headers)

@@ -61,7 +61,7 @@ class Ctx:
 
         tries = 0
         while tries < 3:
-            gen = await XClIdGenStore.get(self.acc.username, fresh=tries > 0)
+            gen = await XClIdGenStore.get(1, fresh=tries > 0)
             hdr = {"x-client-transaction-id": gen.calc(method, path)}
             rep = await self.clt.request(method, url, params=params, headers=hdr)
             if rep.status_code != 404:
@@ -135,20 +135,20 @@ class QueueClient:
 
         ctx, self.ctx, self.req_count = self.ctx, None, 0
         username = ctx.acc.username
-        
-        # if inactive or reset_at > 0:
-        #     print(f"Closing client for {username}")
-        #     await ctx.aclose()
+
+        await ctx.aclose()
 
         if inactive:
-            await self.pool.mark_inactive(username, msg)
+            await self.pool.mark_inactive(username, msg, tx=ctx.acc._tx)
             return
 
         if reset_at > 0:
-            await self.pool.lock_until(ctx.acc.username, self.queue, reset_at, ctx.req_count)
+            await self.pool.lock_until(
+                ctx.acc.username, self.queue, reset_at, ctx.req_count, tx=ctx.acc._tx
+            )
             return
 
-        await self.pool.unlock(ctx.acc.username, self.queue, ctx.req_count)
+        await self.pool.unlock(ctx.acc.username, self.queue, ctx.req_count, tx=ctx.acc._tx)
 
     async def _get_ctx(self):
         if self.ctx:

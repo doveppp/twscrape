@@ -181,6 +181,7 @@ class User(JSONTrait):
     descriptionLinks: list[TextLink] = field(default_factory=list)
     pinnedIds: list[int] = field(default_factory=list)
     verification: VerificationInfo | None = None
+    profileInterstitialType: str | None = None
     _type: str = "snscrape.modules.twitter.User"
 
     # todo:
@@ -212,13 +213,13 @@ class User(JSONTrait):
         )
         profile_banner_url = legacy.get("profile_banner_url") or obj.get("profile_banner_url")
         verified = legacy.get("verified") or obj.get("verified")
-        protected = legacy.get("protected") or obj.get("protected")
+        protected = legacy.get("protected") or obj.get("privacy", {}).get("protected")
         entities = legacy.get("entities") or obj.get("entities", {})
         pinned_ids = legacy.get("pinned_tweet_ids_str") or obj.get("pinned_tweet_ids_str", [])
         # is_blue_verified is at top level in new format
         blue = obj.get("is_blue_verified")
         blue_type = obj.get("verified_type")
-
+        profile_interstitial_type = obj.get("profile_interstitial_type")
         return User(
             id=int(obj["id_str"]),
             id_str=obj["id_str"],
@@ -245,6 +246,7 @@ class User(JSONTrait):
             ),
             pinnedIds=[int(x) for x in pinned_ids],
             verification=VerificationInfo.parse(obj.get("verification", {})),
+            profileInterstitialType=profile_interstitial_type,
         )
 
 
