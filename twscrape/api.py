@@ -20,7 +20,7 @@ from .queue_client import QueueClient
 from .utils import encode_params, find_obj, get_by_path
 
 # OP_{NAME} – {NAME} should be same as second part of GQL ID (required to auto-update script)
-OP_SearchTimeline = "z_yqhtrZVEuFEUhYsDyzOg/SearchTimeline"
+OP_SearchTimeline = "rkp6b4vtR9u7v3naGoOzUQ/SearchTimeline"
 OP_UserByRestId = "WJ7rCtezBVT6nk6VM5R8Bw/UserByRestId"
 OP_UserByScreenName = "pLsOiyHJ1eFwPJlNmLp4Bg/UserByScreenName"
 OP_TweetDetail = "6QzqakNMdh_YzBAR9SYPkQ/TweetDetail"
@@ -131,7 +131,7 @@ class API:
                 params = {"variables": kv, "features": ft}
                 if cur is not None:
                     params["variables"]["cursor"] = cur
-                if queue in ("SearchTimeline", "ListLatestTweetsTimeline"):
+                if queue in ("ListLatestTweetsTimeline"):
                     params["fieldToggles"] = {"withArticleRichContentState": False}
                 if queue in ("UserMedia",):
                     params["fieldToggles"] = {"withArticlePlainText": False}
@@ -141,8 +141,9 @@ class API:
 
                 obj = rep.json()
                 els = get_by_path(obj, "entries") or []
-                cur = self._get_cursor({"e": els}, cursor_type)
-
+                cur = self._get_cursor({"e": els}, cursor_type) or self._get_cursor(
+                    obj, cursor_type
+                )
                 els = [
                     x
                     for x in els
@@ -178,7 +179,7 @@ class API:
             "count": 20,
             "product": "Latest",
             "querySource": "typed_query",
-            "withGrokTranslatedBio": False,
+            # "withGrokTranslatedBio": False,
             **(kv or {}),
         }
         async with aclosing(self._gql_items(op, kv, limit=limit)) as gen:
@@ -190,6 +191,7 @@ class API:
             async for rep in gen:
                 for x in parse_tweets(rep.json(), limit):
                     yield x
+                # return
 
     async def search_user(self, q: str, limit=-1, kv: KV = None):
         kv = {"product": "People", **(kv or {})}
