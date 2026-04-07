@@ -282,7 +282,9 @@ class Tweet(JSONTrait):
     source: str | None = None
     sourceUrl: str | None = None
     sourceLabel: str | None = None
-    card: Union[None, "SummaryCard", "PollCard", "BroadcastCard", "AudiospaceCard"] = None
+    card: Union[
+        None, "SummaryCard", "PollCard", "BroadcastCard", "AudiospaceCard", "MessageMeCard"
+    ] = None
     possibly_sensitive: bool | None = None
     _type: str = "snscrape.modules.twitter.Tweet"
 
@@ -490,6 +492,16 @@ class BroadcastCard(Card):
 class AudiospaceCard(Card):
     url: str
     _type: str = "audiospace"
+
+
+@dataclass
+class MessageMeCard(Card):
+    """X \"Message me\" card (DM CTA), e.g. name `2586390716:message_me`."""
+
+    url: str
+    recipient: UserRef | None = None
+    cta: str | None = None
+    _type: str = "message_me"
 
 
 @dataclass
@@ -704,6 +716,23 @@ def _parse_card(obj: dict, url: str):
 
         # print(json.dumps(val, indent=2))
         return AudiospaceCard(url=card_url)
+
+    if re.fullmatch(r"\d+:message_me", name or ""):
+        val = _parse_card_prepare_values(obj)
+        card_url = _parse_card_get_str(val, "card_url")
+        cta = _parse_card_get_str(val, "cta")
+        if card_url is None:
+            return None
+
+        recipient = None
+        ures = get_or(obj, "card.legacy.user_refs_results", [])
+        if ures and ures[0].get("result"):
+            u = ures[0]["result"]
+            uid = u.get("id_str") or u.get("rest_id")
+            if uid:
+                recipient = UserRef.parse({**u, "id_str": str(uid)})
+
+        return MessageMeCard(url=card_url, recipient=recipient, cta=cta)
 
     logger.warning(f"Unknown card type '{name}' on {url}")
     if "PYTEST_CURRENT_TEST" in os.environ:  # help debugging tests

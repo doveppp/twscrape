@@ -1,0 +1,560 @@
+{
+  "data": {
+      "tweetResult": {
+          "result": {
+              "__typename": "Tweet",
+              "card": {
+                  "legacy": {
+                      "binding_values": [
+                          {
+                              "key": "_omit_link_",
+                              "value": {
+                                  "boolean_value": false,
+                                  "type": "BOOLEAN"
+                              }
+                          },
+                          {
+                              "key": "recipient",
+                              "value": {
+                                  "type": "USER",
+                                  "user_value": {
+                                      "id_str": "1854582391727329280",
+                                      "path": []
+                                  }
+                              }
+                          },
+                          {
+                              "key": "cta",
+                              "value": {
+                                  "string_value": "message_me_card_cta_2",
+                                  "type": "STRING"
+                              }
+                          },
+                          {
+                              "key": "card_url",
+                              "value": {
+                                  "scribe_key": "card_url",
+                                  "string_value": "https://t.co/5HClgK9dxx",
+                                  "type": "STRING"
+                              }
+                          }
+                      ],
+                      "card_platform": {
+                          "platform": {
+                              "audience": {
+                                  "name": "production"
+                              },
+                              "device": {
+                                  "name": "Swift",
+                                  "version": "12"
+                              }
+                          }
+                      },
+                      "name": "2586390716:message_me",
+                      "url": "https://t.co/5HClgK9dxx",
+                      "user_refs_results": [
+                          {
+                              "result": {
+                                  "__typename": "User",
+                                  "affiliates_highlighted_label": {},
+                                  "avatar": {
+                                      "image_url": "https://pbs.twimg.com/profile_images/1969410764885708800/ZEZM0KcO_normal.jpg"
+                                  },
+                                  "core": {
+                                      "created_at": "Thu Nov 07 17:51:45 +0000 2024",
+                                      "name": "معاذ النسر🦅",
+                                      "screen_name": "H2mo2962"
+                                  },
+                                  "dm_permissions": {
+                                      "can_dm": true
+                                  },
+                                  "follow_request_sent": false,
+                                  "has_graduated_access": true,
+                                  "id": "VXNlcjoxODU0NTgyMzkxNzI3MzI5Mjgw",
+                                  "is_blue_verified": false,
+                                  "legacy": {
+                                      "default_profile": true,
+                                      "default_profile_image": false,
+                                      "description": "option 📈📉",
+                                      "entities": {
+                                          "description": {
+                                              "urls": []
+                                          }
+                                      },
+                                      "fast_followers_count": 0,
+                                      "favourites_count": 154,
+                                      "follow_request_sent": false,
+                                      "followers_count": 904,
+                                      "friends_count": 673,
+                                      "has_custom_timelines": false,
+                                      "is_translator": false,
+                                      "listed_count": 0,
+                                      "media_count": 247,
+                                      "normal_followers_count": 904,
+                                      "notifications": false,
+                                      "pinned_tweet_ids_str": [
+                                          "1986093055946936443"
+                                      ],
+                                      "possibly_sensitive": false,
+                                      "profile_banner_url": "https://pbs.twimg.com/profile_banners/1854582391727329280/1758379093",
+                                      "profile_interstitial_type": "",
+                                      "statuses_count": 326,
+                                      "translator_type": "none",
+                                      "want_retweets": false,
+                                      "withheld_in_countries": []
+                                  },
+                                  "location": {
+                                      "location": ""
+                                  },
+                                  "media_permissions": {
+                                      "can_media_tag": true
+                                  },
+                                  "parody_commentary_fan_label": "None",
+                                  "privacy": {
+                                      "protected": false
+                                  },
+                                  "profile_bio": {
+                                      "description": "option 📈📉"
+                                  },
+                                  "profile_description_language": "en",
+                                  "profile_image_shape": "Circle",
+                                  "relationship_perspectives": {
+                                      "blocked_by": false,
+                                      "blocking": false,
+                                      "followed_by": false,
+                                      "following": false,
+                                      "muting": false
+                                  },
+                                  "rest_id": "1854582391727329280",
+                                  "super_follow_eligible": false,
+                                  "super_followed_by": false,
+                                  "super_following": false,
+                                  "verification": {
+                                      "verified": false
+                                  }
+                              }
+                          }
+                      ]
+                  },
+                  "rest_id": "https://t.co/5HClgK9dxx"
+              },
+              "core": {
+                  "user_results": {
+                      "result": {
+                          "__typename": "User",
+                          "affiliates_highlighted_label": {},
+                          "avatar": {
+                              "image_url": "https://pbs.twimg.com/profile_images/1969410764885708800/ZEZM0KcO_normal.jpg"
+                          },
+                          "core": {
+                              "created_at": "Thu Nov 07 17:51:45 +0000 2024",
+                              "name": "معاذ النسر🦅",
+                              "screen_name": "H2mo2962"
+                          },
+                          "dm_permissions": {
+                              "can_dm": true
+                          },
+                          "follow_request_sent": false,
+                          "has_graduated_access": true,
+                          "id": "VXNlcjoxODU0NTgyMzkxNzI3MzI5Mjgw",
+                          "is_blue_verified": false,
+                          "legacy": {
+                              "default_profile": true,
+                              "default_profile_image": false,
+                              "description": "option 📈📉",
+                              "entities": {
+                                  "description": {
+                                      "urls": []
+                                  }
+                              },
+                              "fast_followers_count": 0,
+                              "favourites_count": 154,
+                              "follow_request_sent": false,
+                              "followers_count": 904,
+                              "friends_count": 673,
+                              "has_custom_timelines": false,
+                              "is_translator": false,
+                              "listed_count": 0,
+                              "media_count": 247,
+                              "normal_followers_count": 904,
+                              "notifications": false,
+                              "pinned_tweet_ids_str": [
+                                  "1986093055946936443"
+                              ],
+                              "possibly_sensitive": false,
+                              "profile_banner_url": "https://pbs.twimg.com/profile_banners/1854582391727329280/1758379093",
+                              "profile_interstitial_type": "",
+                              "statuses_count": 326,
+                              "translator_type": "none",
+                              "want_retweets": false,
+                              "withheld_in_countries": []
+                          },
+                          "location": {
+                              "location": ""
+                          },
+                          "media_permissions": {
+                              "can_media_tag": true
+                          },
+                          "parody_commentary_fan_label": "None",
+                          "privacy": {
+                              "protected": false
+                          },
+                          "profile_bio": {
+                              "description": "option 📈📉"
+                          },
+                          "profile_description_language": "en",
+                          "profile_image_shape": "Circle",
+                          "relationship_perspectives": {
+                              "blocked_by": false,
+                              "blocking": false,
+                              "followed_by": false,
+                              "following": false,
+                              "muting": false
+                          },
+                          "rest_id": "1854582391727329280",
+                          "super_follow_eligible": false,
+                          "super_followed_by": false,
+                          "super_following": false,
+                          "verification": {
+                              "verified": false
+                          }
+                      }
+                  }
+              },
+              "edit_control": {
+                  "edit_tweet_ids": [
+                      "1970565628139618451"
+                  ],
+                  "editable_until_msecs": "1758658031000",
+                  "edits_remaining": "5",
+                  "is_edit_eligible": true
+              },
+              "grok_analysis_button": true,
+              "grok_annotations": {},
+              "grok_translated_post_with_availability": {
+                  "is_available": false
+              },
+              "has_birdwatch_notes": false,
+              "is_translatable": true,
+              "legacy": {
+                  "bookmark_count": 0,
+                  "bookmarked": false,
+                  "conversation_id_str": "1970565628139618451",
+                  "created_at": "Tue Sep 23 19:07:11 +0000 2025",
+                  "display_text_range": [
+                      0,
+                      259
+                  ],
+                  "entities": {
+                      "hashtags": [
+                          {
+                              "indices": [
+                                  104,
+                                  119
+                              ],
+                              "text": "السوق_الامريكي"
+                          },
+                          {
+                              "indices": [
+                                  122,
+                                  141
+                              ],
+                              "text": "الفيدرالي_الامريكي"
+                          },
+                          {
+                              "indices": [
+                                  143,
+                                  160
+                              ],
+                              "text": "الاسهم_الامريكية"
+                          },
+                          {
+                              "indices": [
+                                  162,
+                                  167
+                              ],
+                              "text": "تاسي"
+                          }
+                      ],
+                      "smarttags": [],
+                      "symbols": [
+                          {
+                              "indices": [
+                                  168,
+                                  173
+                              ],
+                              "tag": {
+                                  "info": {
+                                      "info": {
+                                          "name": "Lucid Group Inc",
+                                          "ticker": "LCID"
+                                      }
+                                  }
+                              },
+                              "text": "LCID"
+                          },
+                          {
+                              "indices": [
+                                  174,
+                                  179
+                              ],
+                              "tag": {
+                                  "info": {
+                                      "info": {
+                                          "name": "Meta Platforms Inc",
+                                          "ticker": "META"
+                                      }
+                                  }
+                              },
+                              "text": "META"
+                          },
+                          {
+                              "indices": [
+                                  182,
+                                  187
+                              ],
+                              "tag": {
+                                  "info": {
+                                      "info": {
+                                          "name": "NVIDIA Corp",
+                                          "ticker": "NVDA"
+                                      }
+                                  }
+                              },
+                              "text": "NVDA"
+                          },
+                          {
+                              "indices": [
+                                  191,
+                                  195
+                              ],
+                              "tag": {
+                                  "info": {
+                                      "info": {
+                                          "name": "Advanced Micro Devices Inc",
+                                          "ticker": "AMD"
+                                      }
+                                  }
+                              },
+                              "text": "AMD"
+                          },
+                          {
+                              "indices": [
+                                  196,
+                                  200
+                              ],
+                              "tag": {
+                                  "info": {
+                                      "info": {
+                                          "name": "AMC Entertainment Holdings Inc",
+                                          "ticker": "AMC"
+                                      }
+                                  }
+                              },
+                              "text": "AMC"
+                          },
+                          {
+                              "indices": [
+                                  201,
+                                  205
+                              ],
+                              "tag": {
+                                  "info": {
+                                      "info": {
+                                          "name": "GameStop Corp",
+                                          "ticker": "GME"
+                                      }
+                                  }
+                              },
+                              "text": "GME"
+                          },
+                          {
+                              "indices": [
+                                  206,
+                                  210
+                              ],
+                              "tag": {
+                                  "info": {
+                                      "info": {
+                                          "name": "Nokia Oyj",
+                                          "ticker": "NOK"
+                                      }
+                                  }
+                              },
+                              "text": "NOK"
+                          },
+                          {
+                              "indices": [
+                                  212,
+                                  216
+                              ],
+                              "tag": {
+                                  "info": {
+                                      "info": {
+                                          "name": "State Street SPDR S\u0026P 500 ETF",
+                                          "ticker": "SPY"
+                                      }
+                                  }
+                              },
+                              "text": "SPY"
+                          },
+                          {
+                              "indices": [
+                                  217,
+                                  220
+                              ],
+                              "tag": {
+                                  "info": {
+                                      "info": {
+                                          "name": "RH",
+                                          "ticker": "RH"
+                                      }
+                                  }
+                              },
+                              "text": "RH"
+                          },
+                          {
+                              "indices": [
+                                  221,
+                                  224
+                              ],
+                              "tag": {
+                                  "info": {
+                                      "info": {
+                                          "name": "BlackBerry Ltd",
+                                          "ticker": "BB"
+                                      }
+                                  }
+                              },
+                              "text": "BB"
+                          },
+                          {
+                              "indices": [
+                                  225,
+                                  229
+                              ],
+                              "tag": {
+                                  "info": {
+                                      "info": {
+                                          "name": "Rocket Companies Inc",
+                                          "ticker": "RKT"
+                                      }
+                                  }
+                              },
+                              "text": "RKT"
+                          },
+                          {
+                              "indices": [
+                                  230,
+                                  235
+                              ],
+                              "tag": {
+                                  "info": {
+                                      "info": {
+                                          "name": "Apple Inc",
+                                          "ticker": "AAPL"
+                                      }
+                                  }
+                              },
+                              "text": "AAPL"
+                          },
+                          {
+                              "indices": [
+                                  236,
+                                  240
+                              ],
+                              "tag": {
+                                  "info": {
+                                      "info": {
+                                          "name": "American Airlines Group Inc",
+                                          "ticker": "AAL"
+                                      }
+                                  }
+                              },
+                              "text": "AAL"
+                          },
+                          {
+                              "indices": [
+                                  242,
+                                  247
+                              ],
+                              "tag": {
+                                  "info": {
+                                      "info": {
+                                          "name": "Amazon.com Inc",
+                                          "ticker": "AMZN"
+                                      }
+                                  }
+                              },
+                              "text": "AMZN"
+                          },
+                          {
+                              "indices": [
+                                  248,
+                                  253
+                              ],
+                              "tag": {
+                                  "info": {
+                                      "info": {
+                                          "name": "Alphabet Inc",
+                                          "ticker": "GOOG"
+                                      }
+                                  }
+                              },
+                              "text": "GOOG"
+                          },
+                          {
+                              "indices": [
+                                  254,
+                                  259
+                              ],
+                              "tag": {
+                                  "info": {
+                                      "info": {
+                                          "name": "Tesla Inc",
+                                          "ticker": "TSLA"
+                                      }
+                                  }
+                              },
+                              "text": "TSLA"
+                          }
+                      ],
+                      "timestamps": [],
+                      "urls": [
+                          {
+                              "display_url": "x.com/messages/compo…",
+                              "expanded_url": "https://x.com/messages/compose?recipient_id=1854582391727329280",
+                              "indices": [
+                                  78,
+                                  101
+                              ],
+                              "url": "https://t.co/5HClgK9dxx"
+                          }
+                      ],
+                      "user_mentions": []
+                  },
+                  "favorite_count": 0,
+                  "favorited": false,
+                  "full_text": "معك أي سهم في السوق الأمريكي وتبي مساعدة؟ \nتواصل معي وأبشر بساعدك بإذن الله 🤍\nhttps://t.co/5HClgK9dxx\n.\n#السوق_الامريكي ، #الفيدرالي_الامريكي، #الاسهم_الامريكية، #تاسي\n$LCID $META ، $NVDA  ، $AMD\n$AMC $GME $NOK  $SPY $RH $BB $RKT $AAPL $AAL  $AMZN $GOOG $TSLA",
+                  "id_str": "1970565628139618451",
+                  "is_quote_status": false,
+                  "lang": "ar",
+                  "possibly_sensitive": false,
+                  "possibly_sensitive_editable": true,
+                  "quote_count": 0,
+                  "reply_count": 0,
+                  "retweet_count": 0,
+                  "retweeted": false,
+                  "user_id_str": "1854582391727329280"
+              },
+              "rest_id": "1970565628139618451",
+              "source": "\u003ca href=\"http://twitter.com/download/android\" rel=\"nofollow\"\u003eTwitter for Android\u003c/a\u003e",
+              "unmention_data": {},
+              "views": {
+                  "count": "230",
+                  "state": "EnabledWithCount"
+              }
+          }
+      }
+  }
+}
