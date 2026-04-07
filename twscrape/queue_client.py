@@ -38,8 +38,8 @@ class XClIdGenStore:
                 return clid_gen
             except httpx.HTTPStatusError:
                 tries += 1
-                await asyncio.sleep(1)
-
+                await asyncio.sleep(0.2)
+        logger.error(f"Failed to create XClIdGen for {username}")
         raise AbortReqError(
             "Faield to create XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
         )
@@ -69,7 +69,7 @@ class Ctx:
 
             tries += 1
             logger.debug(f"Retrying request with new x-client-transaction-id: {url}")
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.2)
 
         raise AbortReqError(
             "Faield to get XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
