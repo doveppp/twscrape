@@ -658,8 +658,17 @@ def _parse_card(obj: dict, url: str):
         do = get_or(val, "destination_objects", {})
         me = list(get_or(val, "media_entities", {}).values())
         # 过滤掉grok
-        if len(me) > 1 and me[0].get("source_user_id") != 1720665183188922368:
-            logger.debug(f"[Card] Multiple media entities: {json.dumps(me, indent=2)}")
+        if (
+            len(me) > 1
+            and me[0].get("source_user_id") != 1720665183188922368
+            and obj.get("user_id_str") != "1720665183188922368"
+        ):
+            twid = obj.get("id_str")
+            logger.debug(
+                f"[Card] Multiple media entities (tweet id={twid}): {json.dumps(me, indent=2)}"
+            )
+            with open(f"/tmp/twscrape-obj-{twid}.json", "w") as f:
+                f.write(json.dumps(obj, indent=2))
 
         me = me[0] if me else {}
 
