@@ -20,6 +20,7 @@ classifiers = [
   'Programming Language :: Python :: 3.13',
 ]
 dependencies = [
+  "asyncmy>=0.2.9",
   "aiosqlite>=0.17.0",
   "fake-useragent>=1.4.0",
   "httpx>=0.26.0",

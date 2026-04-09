@@ -2,7 +2,8 @@ import atexit
 import warnings
 from urllib.parse import urlparse
 
-import aiomysql
+import asyncmy
+from asyncmy.cursors import DictCursor
 
 from .logger import logger
 
@@ -113,13 +114,13 @@ class DBPool:
                 await cls.close_all()
 
             p = urlparse(db_path)
-            cls._pool = await aiomysql.create_pool(
+            cls._pool = await asyncmy.create_pool(
                 host=p.hostname,
                 port=p.port or 3306,
                 user=p.username,
                 password=p.password,
                 db=p.path.lstrip("/"),
-                cursorclass=aiomysql.DictCursor,
+                cursor_cls=DictCursor,
                 autocommit=True,
             )
             cls._db_path = db_path
