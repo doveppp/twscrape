@@ -34,6 +34,8 @@ XCLID_FAIL_LOCK_SECONDS = 1 * 60
 UNKNOWN_FAIL_DEACTIVATE_THRESHOLD = 3
 # Lock duration applied to an account on each unknown error (seconds).
 UNKNOWN_FAIL_LOCK_SECONDS = 60 * 15
+# Lock duration applied to an account when X serves a logged-out web build (seconds).
+XCLID_ACCOUNT_FAIL_LOCK_SECONDS = 60 * 15
 
 
 class HandledError(Exception): ...
@@ -414,8 +416,28 @@ class QueueClient:
                 # retry with new account
                 continue
             except XClIdAccountError as e:
-                logger.warning(self._format_ctx_error(ctx, e))
-                await self._close_ctx(utc.ts() + 60 * 15)
+                # A logged-out session is an account-level problem: count it together with the
+                # other x-client-transaction-id failures and freeze the account for every queue
+                # instead of only cooling down the queue that happened to hit it.
+                username = ctx.acc.username
+                err = self._format_ctx_error(ctx, e)
+                fail_count = await self.pool.incr_fail_count(username, "xclid")
+
+                if fail_count >= XCLID_FAIL_DEACTIVATE_THRESHOLD:
+                    logger.warning(
+                        f"Logged-out X web app {fail_count}/{XCLID_FAIL_DEACTIVATE_THRESHOLD}; "
+                        f"deactivating account: {username}"
+                    )
+                    await self._close_ctx(-1, inactive=True, msg=err)
+                else:
+                    lock_min = XCLID_ACCOUNT_FAIL_LOCK_SECONDS // 60
+                    logger.warning(
+                        f"Logged-out X web app {fail_count}/{XCLID_FAIL_DEACTIVATE_THRESHOLD}; "
+                        f"locking {username} for {lock_min} minutes (global)"
+                    )
+                    await self._close_ctx(
+                        utc.ts() + XCLID_ACCOUNT_FAIL_LOCK_SECONDS, global_lock=True
+                    )
                 continue
             except XClIdParseError as e:
                 logger.error(

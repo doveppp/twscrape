@@ -1014,7 +1014,9 @@ async def test_missing_required_cookies_deactivates_and_rotates(
     await client.__aexit__(None, None, None)
 
 
-async def test_xclid_account_error_locks_queue_and_rotates(pool_mock: AccountsPool, monkeypatch):
+async def test_xclid_account_error_freezes_account_and_rotates(
+    pool_mock: AccountsPool, monkeypatch
+):
     mock = MockClient()
     monkeypatch.setattr(Account, "make_client", lambda self, proxy=None: mock)
     pool_mock._order_by = "username"
@@ -1045,6 +1047,41 @@ async def test_xclid_account_error_locks_queue_and_rotates(pool_mock: AccountsPo
     user1 = await pool_mock.get("user1")
     assert user1.active is True
     assert int(user1.locks["SearchTimeline"].timestamp()) > utc.ts() + 60 * 10
+    # the failure is persisted and the account is frozen for every queue.
+    # user1 sorts first, so picking user2 on another queue proves the freeze applies there too.
+    assert user1.xclid_fail_count == 1
+    assert user1.global_locked_until is not None
+    picked = await pool_mock.get_for_queue("TweetDetail")
+    assert picked is not None and picked.username == "user2"
+    await client.__aexit__(None, None, None)
+
+
+async def test_xclid_account_error_deactivates_after_threshold(
+    pool_mock: AccountsPool, monkeypatch
+):
+    mock = MockClient()
+    monkeypatch.setattr(Account, "make_client", lambda self, proxy=None: mock)
+    pool_mock._order_by = "username"
+    await pool_mock.add_account(
+        "user1", "pass1", "email1", "email_pass1", cookies="auth_token=t; ct0=c"
+    )
+    await pool_mock.set_active("user1", True)
+    await pool_mock.incr_fail_count("user1", "xclid")
+    await pool_mock.incr_fail_count("user1", "xclid")
+
+    async def fake_get(cls, username, proxy=None, cookies=None, fresh=False):
+        raise XClIdAccountError("Logged-out X web app")
+
+    monkeypatch.setattr(XClIdGenStore, "get", classmethod(fake_get))
+
+    client = QueueClient(pool_mock, "SearchTimeline")
+    rep = await client.get(URL)
+
+    assert rep is None
+    user1 = await pool_mock.get("user1")
+    assert user1.active is False
+    assert user1.xclid_fail_count == 0  # mark_inactive clears the counters
+    assert "Logged-out X web app" in (user1.error_msg or "")
     await client.__aexit__(None, None, None)
 
 
