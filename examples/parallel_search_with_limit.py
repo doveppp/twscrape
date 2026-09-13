@@ -1,19 +1,19 @@
 """
-This example shows how to use twscrape in parallel with concurrency limit.
+This example shows how to use dovexscrape in parallel with concurrency limit.
 """
 
 import asyncio
 import time
 
-import twscrape
+import dovexscrape
 
 
-async def worker(queue: asyncio.Queue, api: twscrape.API):
+async def worker(queue: asyncio.Queue, api: dovexscrape.API):
     while True:
         query = await queue.get()
 
         try:
-            tweets = await twscrape.gather(api.search(query))
+            tweets = await dovexscrape.gather(api.search(query))
             print(f"{query} - {len(tweets)} - {int(time.time())}")
             # do something with tweets here, eg same to file, etc
         except Exception as e:
@@ -23,7 +23,7 @@ async def worker(queue: asyncio.Queue, api: twscrape.API):
 
 
 async def main():
-    api = twscrape.API()
+    api = dovexscrape.API()
     # add accounts here or before from cli (see README.md for examples)
     await api.pool.add_account("u1", "p1", "eu1", "ep1")
     await api.pool.login_all()

@@ -24,11 +24,26 @@ from .xclid import XClIdAccountError, XClIdGen, XClIdParseError
 ReqParams = dict[str, str | int] | None
 TMP_TS = utc.now().isoformat().split(".")[0].replace("T", "_").replace(":", "-")[0:16]
 
+# Per-request cap: how many accounts may hit XClId 404 exhaustion before aborting.
+MAX_XCLID_404_INACTIVE_ACCOUNTS = 10
+# Consecutive XClIdRetryExhaustedError per account before deactivating it.
+XCLID_FAIL_DEACTIVATE_THRESHOLD = 3
+# Lock duration applied to an account on each XClIdRetryExhaustedError (seconds).
+XCLID_FAIL_LOCK_SECONDS = 1 * 60
+# Consecutive unknown errors (retry budget exhausted) before deactivating an account.
+UNKNOWN_FAIL_DEACTIVATE_THRESHOLD = 3
+# Lock duration applied to an account on each unknown error (seconds).
+UNKNOWN_FAIL_LOCK_SECONDS = 60 * 15
+
 
 class HandledError(Exception): ...
 
 
 class AbortReqError(Exception): ...
+
+
+class XClIdRetryExhaustedError(Exception):
+    """HTTP 404 persists after 3 retries with a fresh x-client-transaction-id."""
 
 
 class GqlFeaturesOutdatedError(AbortReqError):
@@ -86,7 +101,7 @@ class Ctx:
 
     async def req(self, method: HttpMethod, url: str, params: ReqParams = None) -> Response:
         # if code 404 on first try then generate new x-client-transaction-id and retry
-        # https://github.com/vladkens/twscrape/issues/248
+        # https://github.com/doveppp/dovexscrape/issues/248
         path = urlparse(url).path or "/"
 
         tries = 0
@@ -106,8 +121,9 @@ class Ctx:
             logger.debug(f"Retrying request with new x-client-transaction-id: {url}")
             await asyncio.sleep(1)
 
-        raise AbortReqError(
-            "Faield to get XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
+        raise XClIdRetryExhaustedError(
+            "Still 404 after 3 x-client-transaction-id retries. "
+            "See: https://github.com/doveppp/dovexscrape/issues/248"
         )
 
 
@@ -140,7 +156,7 @@ def dump_rep(rep: Response):
 
     acc = getattr(rep, "__username", "<unknown>")
     outfile = f"{count:05d}_{rep.status_code}_{acc}.txt"
-    outfile = f"/tmp/twscrape-{TMP_TS}/{outfile}"
+    outfile = f"/tmp/dovexscrape-{TMP_TS}/{outfile}"
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
 
     msg = []
@@ -176,23 +192,36 @@ class QueueClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self._close_ctx()
 
-    async def _close_ctx(self, reset_at=-1, inactive=False, msg: str | None = None):
+    async def _close_ctx(
+        self, reset_at=-1, inactive=False, msg: str | None = None, global_lock=False
+    ):
         if self.ctx is None:
             return
 
         ctx, self.ctx, self.req_count = self.ctx, None, 0
         username = ctx.acc.username
+        tx = ctx.acc._tx
         await ctx.aclose()
 
         if inactive:
-            await self.pool.mark_inactive(username, msg)
+            await self.pool.mark_inactive(username, msg, tx=tx)
             return
 
         if reset_at > 0:
-            await self.pool.lock_until(ctx.acc.username, self.queue, reset_at, ctx.req_count)
+            await self.pool.lock_until(username, self.queue, reset_at, ctx.req_count, tx=tx)
+            if global_lock:  # freeze the account for every queue, not just this one
+                await self.pool.lock_global(username, reset_at, tx=tx)
             return
 
-        await self.pool.unlock(ctx.acc.username, self.queue, ctx.req_count)
+        await self.pool.unlock(username, self.queue, ctx.req_count, tx=tx)
+
+    async def _reset_fail_counts(self, acc: Account):
+        """Clear consecutive-failure counters after a success (no DB call when already zero)."""
+        if acc.xclid_fail_count:
+            await self.pool.reset_fail_count(acc.username, "xclid")
+        if acc.unknown_fail_count:
+            await self.pool.reset_fail_count(acc.username, "unknown")
+        acc.xclid_fail_count = acc.unknown_fail_count = 0
 
     async def _get_ctx(self) -> Ctx | None:
         if self.ctx:
@@ -312,6 +341,8 @@ class QueueClient:
         return await self.req("GET", url, params=params)
 
     async def req(self, method: HttpMethod, url: str, params: ReqParams = None) -> Response | None:
+        xclid_404_inactive_accounts = 0
+
         while True:
             # 1. same ctx until _close_ctx() clears it — that's retry vs rotate
             # 2. no aclose() needed here, __aexit__ handles it
@@ -334,7 +365,7 @@ class QueueClient:
                         "http_method": method,
                         "http_backend": getattr(ctx.clt, "backend", "unknown"),
                         "source": source,
-                        "$current_url": f"{source}://twscrape/gql/{self.queue}",
+                        "$current_url": f"{source}://dovexscrape/gql/{self.queue}",
                     },
                 )
                 rep = await ctx.req(method, url, params=params)
@@ -342,7 +373,37 @@ class QueueClient:
                 await self._check_rep(rep)
 
                 ctx.req_count += 1  # count only successful
+                xclid_404_inactive_accounts = 0
+                await self._reset_fail_counts(ctx.acc)
                 return rep
+            except XClIdRetryExhaustedError as e:
+                xclid_404_inactive_accounts += 1
+                username = ctx.acc.username
+                fail_count = await self.pool.incr_fail_count(username, "xclid")
+
+                if fail_count >= XCLID_FAIL_DEACTIVATE_THRESHOLD:
+                    logger.warning(
+                        "x-client-transaction-id retries exhausted (404) "
+                        f"{fail_count}/{XCLID_FAIL_DEACTIVATE_THRESHOLD}; "
+                        f"deactivating account: {username}"
+                    )
+                    await self._close_ctx(-1, inactive=True, msg=str(e))
+                else:
+                    lock_min = XCLID_FAIL_LOCK_SECONDS // 60
+                    logger.warning(
+                        "x-client-transaction-id retries exhausted (404) "
+                        f"{fail_count}/{XCLID_FAIL_DEACTIVATE_THRESHOLD}; "
+                        f"locking {username} for {lock_min} minutes (global)"
+                    )
+                    await self._close_ctx(utc.ts() + XCLID_FAIL_LOCK_SECONDS, global_lock=True)
+
+                if xclid_404_inactive_accounts >= MAX_XCLID_404_INACTIVE_ACCOUNTS:
+                    logger.error(
+                        "x-client-transaction-id 404 persists after trying "
+                        f"{MAX_XCLID_404_INACTIVE_ACCOUNTS} accounts; aborting {method} {url}"
+                    )
+                    return None
+                continue
             except GqlFeaturesOutdatedError:
                 # structurally invalid request, retrying cannot help — let the caller see it
                 raise
@@ -359,7 +420,7 @@ class QueueClient:
             except XClIdParseError as e:
                 logger.error(
                     f"{self._format_ctx_error(ctx, e)}; "
-                    "Report: https://github.com/vladkens/twscrape/issues"
+                    "Report: https://github.com/doveppp/dovexscrape/issues"
                 )
                 await self._close_ctx()
                 return None
@@ -375,12 +436,27 @@ class QueueClient:
                 if ctx.fail(FailKind.UNKNOWN):
                     continue
 
-                msg = [
-                    "Unknown error. Account timeouted for 15 minutes.",
-                    "Create issue please: https://github.com/vladkens/twscrape/issues",
-                    "If it mistake, you can unlock accounts with `twscrape reset_locks`. "
-                    f"Err: {self._format_ctx_error(ctx, e)}",
-                ]
+                # Retry budget for this account is exhausted: persist the failure and
+                # freeze (or deactivate) the account so every queue stops picking it.
+                username = ctx.acc.username
+                err = self._format_ctx_error(ctx, e)
+                fail_count = await self.pool.incr_fail_count(username, "unknown")
 
-                logger.warning(" ".join(msg))
-                await self._close_ctx(utc.ts() + 60 * 15)  # 15 minutes
+                if fail_count >= UNKNOWN_FAIL_DEACTIVATE_THRESHOLD:
+                    logger.warning(
+                        f"Unknown error {fail_count}/{UNKNOWN_FAIL_DEACTIVATE_THRESHOLD}; "
+                        f"deactivating account: {username}; Err: {err}"
+                    )
+                    await self._close_ctx(-1, inactive=True, msg=err)
+                else:
+                    lock_min = UNKNOWN_FAIL_LOCK_SECONDS // 60
+                    msg = [
+                        f"Unknown error. Account timeouted for {lock_min} minutes "
+                        f"({fail_count}/{UNKNOWN_FAIL_DEACTIVATE_THRESHOLD}, global).",
+                        "Create issue please: https://github.com/doveppp/dovexscrape/issues",
+                        "If it mistake, you can unlock accounts with `dovexscrape reset_locks`. "
+                        f"Err: {err}",
+                    ]
+
+                    logger.warning(" ".join(msg))
+                    await self._close_ctx(utc.ts() + UNKNOWN_FAIL_LOCK_SECONDS, global_lock=True)

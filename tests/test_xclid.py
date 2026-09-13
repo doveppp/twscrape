@@ -2,8 +2,8 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
-import twscrape.xclid as xclid
-from twscrape.http import HttpxClient, NetworkError
+import dovexscrape.xclid as xclid
+from dovexscrape.http import HttpxClient, NetworkError
 
 from .mock_http import MockClient
 
@@ -83,7 +83,7 @@ async def test_xclid_create_without_proxy_or_cookies(monkeypatch):
 
 
 async def test_xclid_client_does_not_send_cookies_to_asset_hosts(monkeypatch):
-    monkeypatch.setenv("TWS_HTTP_BACKEND", "httpx")
+    monkeypatch.setenv("DOVEXSCRAPE_HTTP_BACKEND", "httpx")
     client = xclid._make_client(cookies={"auth_token": "abc", "ct0": "def"})
     assert isinstance(client, HttpxClient)
     try:
@@ -98,7 +98,7 @@ async def test_xclid_client_does_not_send_cookies_to_asset_hosts(monkeypatch):
 
 
 async def test_xclid_curl_client_scopes_cookies_to_x(monkeypatch):
-    monkeypatch.setenv("TWS_HTTP_BACKEND", "curl")
+    monkeypatch.setenv("DOVEXSCRAPE_HTTP_BACKEND", "curl")
     client = xclid._make_client(cookies={"auth_token": "abc"})
     try:
         cookies = list(client.cookies.jar)
@@ -150,7 +150,7 @@ def test_legacy_webpack_build_with_7_hex_hashes():
 
 def test_legacy_webpack_build_with_16_hex_hashes():
     # Hash format served since 2026-08-24, e.g. main.15e48250ae23af9ea.js
-    # https://github.com/vladkens/twscrape/issues/327
+    # https://github.com/doveppp/dovexscrape/issues/327
     html = '{100:"main",200:"shared~feature"}+{100:"15e48250ae23af9e",200:"00c0ffee00c0ffee"}'
 
     urls = xclid.get_scripts_list(html)

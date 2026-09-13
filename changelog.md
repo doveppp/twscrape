@@ -12,7 +12,7 @@
 
 - Updated GraphQL operation IDs for current X API compatibility
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.20.0...v0.20.1
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.20.0...v0.20.1
 
 ---
 
@@ -40,7 +40,7 @@
 
 - Updated GraphQL operation IDs for current X API compatibility
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.19.2...v0.20.0
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.19.2...v0.20.0
 
 ---
 
@@ -57,7 +57,7 @@
 ### Maintenance
 - Updated GraphQL operation IDs for current X API compatibility
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.19.1...v0.19.2
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.19.1...v0.19.2
 
 ---
 
@@ -66,17 +66,17 @@
 ### Maintenance
 - Updated GraphQL operation IDs for current X API compatibility
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.19.0...v0.19.1
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.19.0...v0.19.1
 
 ---
 
 ## v0.19.0 – 2026-06-16
 
 ### Breaking Changes
-- Changed raw API responses to return `twscrape.Response` instead of `httpx.Response` (#269, #308)
+- Changed raw API responses to return `dovexscrape.Response` instead of `httpx.Response` (#269, #308)
 
 ### Features
-- Added optional `curl-cffi` HTTP backend for browser-like TLS fingerprinting, enabled with `TWS_HTTP_BACKEND=curl` after installing `twscrape[curl]` (#269, #308)
+- Added optional `curl-cffi` HTTP backend for browser-like TLS fingerprinting, enabled with `DOVEXSCRAPE_HTTP_BACKEND=curl` after installing `dovexscrape[curl]` (#269, #308)
 
 ### Fixes
 - Fixed GraphQL operation IDs and response parsing for current X API responses
@@ -84,9 +84,9 @@
 - Fixed retweeted originals appearing as duplicate top-level tweets in timelines (#310, #311, by @Flaburgan)
 
 ### Improvements
-- Added anonymous GraphQL usage telemetry with opt-out via `TWS_TELEMETRY=0`
+- Added anonymous GraphQL usage telemetry with opt-out via `DOVEXSCRAPE_TELEMETRY=0`
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.18.1...v0.19.0
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.18.1...v0.19.0
 
 ---
 
@@ -96,7 +96,7 @@
 - Fixed profile image URL returning empty when a legacy empty value was present (#309)
 - Fixed user location being empty when the legacy field was an empty string
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.18.0...v0.18.1
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.18.0...v0.18.1
 
 ---
 
@@ -121,7 +121,7 @@
 - Improved robustness of GQL pagination handling
 - Improved proxy handling and `xclid` calculation
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.17.0...v0.18.0
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.17.0...v0.18.0
 
 ---
 
@@ -130,7 +130,7 @@
 ### Fixes
 - Fixed generation of `x-client-transaction-id` header required by the X API (#245, #248)
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.16.0...v0.17.0
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.16.0...v0.17.0
 
 ---
 
@@ -143,7 +143,7 @@
 - Added `list_explore` and `search_trend` methods to scrape trending topics on X (#234, by @mika-jpd)
 - Added ability to search for users/people by query (by @viniciuskloppel)
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.15.0...v0.16.0
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.15.0...v0.16.0
 
 ---
 
@@ -152,7 +152,7 @@
 ### Fixes
 - Fixed SQLite deprecated API warnings on newer Python versions
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.14...v0.15.0
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.14...v0.15.0
 
 ---
 
@@ -164,7 +164,7 @@
 ### Fixes
 - Fixed media type detection in tweet parsing (by @hponka)
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.13...v0.14
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.13...v0.14
 
 ---
 
@@ -184,7 +184,7 @@
 - Fixed bookmarks endpoint response parsing
 - Fixed message prompt tweet types being incorrectly included in results (by @NielsOerbaek)
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.12...v0.13
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.12...v0.13
 
 ---
 
@@ -204,13 +204,13 @@
 - Fixed infinite login loop for non-existent accounts (#132, #165)
 - Fixed async generator resource leaks with `contextlib.aclosing` (by @andylolz)
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.11.1...v0.12
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.11.1...v0.12
 
 ---
 
 ## v0.11.1 – 2024-02-12
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.11...v0.11.1
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.11...v0.11.1
 
 ---
 
@@ -227,7 +227,7 @@
 - Fixed accounts being unnecessarily locked on connection timeout (#113)
 - Fixed proxy errors now raising exceptions instead of silently locking the account
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.10.1...v0.11
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.10.1...v0.11
 
 ---
 
@@ -236,7 +236,7 @@
 ### Fixes
 - Fixed crash in search result parsing (#107)
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.10.0...v0.10.1
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.10.0...v0.10.1
 
 ---
 
@@ -254,7 +254,7 @@
 - Fixed handling of unknown authorization errors that return HTTP 200 (by @NielsOerbaek)
 - Improved login flow and API error handling reliability
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.9.0...v0.10.0
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.9.0...v0.10.0
 
 ---
 
@@ -268,7 +268,7 @@
 - Fixed email verification token retrieval during login (by @aatakansalar)
 - Fixed raw content reconstruction for retweets
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.8.0...v0.9.0
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.8.0...v0.9.0
 
 ---
 
@@ -281,7 +281,7 @@
 - Fixed parsed link count in tweet entities (#56)
 - Fixed email login flow (by @entasadar)
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.7.0...v0.8.0
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.7.0...v0.8.0
 
 ---
 
@@ -297,7 +297,7 @@
 - Fixed `user_by_id`, `user_by_login`, and `tweet_details` to return `None` instead of raising on inaccessible resources
 - Restored login flow with optional email-first verification parameter
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.6.0...v0.7.0
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.6.0...v0.7.0
 
 ---
 
@@ -313,7 +313,7 @@
 ### Fixes
 - Fixed API error handling for responses with HTTP 200 but error payloads in the body
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.5.0...v0.6.0
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.5.0...v0.6.0
 
 ---
 
@@ -330,7 +330,7 @@
 ### Fixes
 - Fixed `tweet_details` crash when the tweet is not found — now returns `None`
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.4.2...v0.5.0
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.4.2...v0.5.0
 
 ---
 
@@ -339,7 +339,7 @@
 ### Improvements
 - Improved queue client stability and request scheduling
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.4.1...v0.4.2
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.4.1...v0.4.2
 
 ---
 
@@ -349,7 +349,7 @@
 - Fixed accounts not being locked after a failed request
 - Fixed CLI accounts list to sort by last used time
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.4.0...v0.4.1
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.4.0...v0.4.1
 
 ---
 
@@ -365,7 +365,7 @@
 - Fixed `user_by_login` CLI endpoint returning incorrect results
 - Fixed double-escaped JSON in non-raw CLI output
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.3.0...v0.4.0
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.3.0...v0.4.0
 
 ---
 
@@ -377,7 +377,7 @@
 ### Fixes
 - Fixed CLI `--raw` output returning a stringified Python dict instead of valid JSON
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.2.2...v0.3.0
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.2.2...v0.3.0
 
 ---
 
@@ -386,7 +386,7 @@
 ### Fixes
 - Fixed compatibility with SQLite 3.34
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.2.1...v0.2.2
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.2.1...v0.2.2
 
 ---
 
@@ -395,7 +395,7 @@
 ### Features
 - Added SQLite version display to the `version` CLI command
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.2.0...v0.2.1
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.2.0...v0.2.1
 
 ---
 
@@ -406,7 +406,7 @@
 - Added `last_used` timestamp and usage statistics tracking per account
 - Added error on unsupported SQLite versions
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.1.1...v0.2.0
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.1.1...v0.2.0
 
 ---
 
@@ -416,14 +416,14 @@
 - Fixed timezone handling in timestamps
 - Added `_type` field to all models for easier type discrimination
 
-**Full Changelog**: https://github.com/vladkens/twscrape/compare/v0.1.0...v0.1.1
+**Full Changelog**: https://github.com/doveppp/dovexscrape/compare/v0.1.0...v0.1.1
 
 ---
 
 ## v0.1.0 – 2023-05-06
 
 ### Features
-- Initial release of twscrape
+- Initial release of dovexscrape
 - GraphQL-based Twitter/X API scraping
 - Account pool with automatic rotation and rate limit handling
 - Search API with cursor-based pagination
@@ -431,6 +431,6 @@
 - Session dump and restore for persistent accounts
 - Automatic retry and account switching on rate limit or failure
 
-**Full Changelog**: https://github.com/vladkens/twscrape/commits/v0.1.0
+**Full Changelog**: https://github.com/doveppp/dovexscrape/commits/v0.1.0
 
 ---

@@ -5,7 +5,7 @@ import pytest
 from curl_cffi.const import CurlECode
 from curl_cffi.requests.errors import RequestsError
 
-from twscrape.http import (
+from dovexscrape.http import (
     _CURL_MAX_RETRIES,
     ConnectError,
     CurlClient,
@@ -86,7 +86,7 @@ def test_format_error():
 
 
 def test_detect_backend_env_curl_not_installed(monkeypatch):
-    monkeypatch.setenv("TWS_HTTP_BACKEND", "curl")
+    monkeypatch.setenv("DOVEXSCRAPE_HTTP_BACKEND", "curl")
     with (
         patch.dict("sys.modules", {"curl_cffi": None}),
         pytest.raises(ImportError, match="curl-cffi is not installed"),
@@ -95,13 +95,13 @@ def test_detect_backend_env_curl_not_installed(monkeypatch):
 
 
 def test_detect_backend_env_httpx(monkeypatch):
-    monkeypatch.setenv("TWS_HTTP_BACKEND", "httpx")
+    monkeypatch.setenv("DOVEXSCRAPE_HTTP_BACKEND", "httpx")
     result = _detect_backend()
     assert result == "httpx"
 
 
 def test_detect_backend_env_missing_backend(monkeypatch):
-    monkeypatch.setenv("TWS_HTTP_BACKEND", "httpx")
+    monkeypatch.setenv("DOVEXSCRAPE_HTTP_BACKEND", "httpx")
     with (
         patch.dict("sys.modules", {"httpx": None}),
         pytest.raises(ImportError, match="not installed"),
@@ -110,19 +110,19 @@ def test_detect_backend_env_missing_backend(monkeypatch):
 
 
 def test_detect_backend_invalid_value(monkeypatch):
-    monkeypatch.setenv("TWS_HTTP_BACKEND", "requests")
+    monkeypatch.setenv("DOVEXSCRAPE_HTTP_BACKEND", "requests")
     with pytest.raises(ValueError, match="Invalid"):
         _detect_backend()
 
 
 def test_detect_backend_default_httpx(monkeypatch):
-    monkeypatch.delenv("TWS_HTTP_BACKEND", raising=False)
+    monkeypatch.delenv("DOVEXSCRAPE_HTTP_BACKEND", raising=False)
     result = _detect_backend()
     assert result == "httpx"
 
 
 def test_detect_backend_default_httpx_missing(monkeypatch):
-    monkeypatch.delenv("TWS_HTTP_BACKEND", raising=False)
+    monkeypatch.delenv("DOVEXSCRAPE_HTTP_BACKEND", raising=False)
     with (
         patch.dict("sys.modules", {"httpx": None}),
         pytest.raises(ImportError, match="httpx is not installed"),
@@ -161,7 +161,7 @@ async def test_http_client_is_async_context_manager():
 
 
 def test_make_client_httpx_returns_httpx_client(monkeypatch):
-    monkeypatch.delenv("TWS_HTTP_BACKEND", raising=False)
+    monkeypatch.delenv("DOVEXSCRAPE_HTTP_BACKEND", raising=False)
     client = make_client("httpx")
     assert isinstance(client, HttpxClient)
 
@@ -242,13 +242,13 @@ async def test_httpx_client_maps_write_and_pool_timeout():
 
 
 def test_detect_backend_ignores_installed_curl_by_default(monkeypatch):
-    monkeypatch.delenv("TWS_HTTP_BACKEND", raising=False)
+    monkeypatch.delenv("DOVEXSCRAPE_HTTP_BACKEND", raising=False)
     result = _detect_backend()
     assert result == "httpx"
 
 
 def test_detect_backend_env_curl_installed(monkeypatch):
-    monkeypatch.setenv("TWS_HTTP_BACKEND", "curl")
+    monkeypatch.setenv("DOVEXSCRAPE_HTTP_BACKEND", "curl")
     result = _detect_backend()
     assert result == "curl"
 
@@ -268,7 +268,7 @@ def test_make_client_unknown_backend_raises():
 
 
 def test_make_client_none_uses_default_httpx(monkeypatch):
-    monkeypatch.delenv("TWS_HTTP_BACKEND", raising=False)
+    monkeypatch.delenv("DOVEXSCRAPE_HTTP_BACKEND", raising=False)
 
     client = make_client(None)
     assert isinstance(client, HttpxClient)
@@ -468,7 +468,7 @@ def test_curl_client_strips_user_agent_from_session():
 
 
 def test_httpx_client_resolves_ua_hint_to_real_string():
-    from twscrape.http import HttpxClient
+    from dovexscrape.http import HttpxClient
 
     expected_ua, _ = _resolve_browser("@chrome", seed=0)
     client = HttpxClient(headers={"user-agent": "@chrome"}, seed=0)

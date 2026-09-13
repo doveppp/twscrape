@@ -1,11 +1,14 @@
+import os
+
 import pytest
 
-from twscrape import telemetry
-from twscrape.account import Account
-from twscrape.accounts_pool import AccountsPool
-from twscrape.api import API
-from twscrape.logger import set_log_level
-from twscrape.queue_client import QueueClient, XClIdGenStore
+from dovexscrape import telemetry
+from dovexscrape.account import Account
+from dovexscrape.accounts_pool import AccountsPool
+from dovexscrape.api import API
+from dovexscrape.db import DB, execute
+from dovexscrape.logger import set_log_level
+from dovexscrape.queue_client import QueueClient, XClIdGenStore
 
 from .mock_http import MockClient
 
@@ -31,9 +34,25 @@ def mock_xclidgenstore(monkeypatch):
 
 
 @pytest.fixture
-def pool_mock(tmp_path):
-    db_path = tmp_path / "test.db"
-    yield AccountsPool(db_path)
+def db_dsn():
+    """MySQL url the tests run against, eg. mysql://user:pass@host:3306/db."""
+    dsn = os.getenv("DOVEXSCRAPE_DB", "")
+    if not dsn:
+        pytest.skip("set DOVEXSCRAPE_DB (mysql://user:pass@host:3306/db) to run database tests")
+    return dsn
+
+
+@pytest.fixture
+async def pool_mock(db_dsn):
+    # tests own the database, so start from an empty schema; dropping the tables and
+    # closing the pool makes the next connection re-run the migrations
+    await execute(db_dsn, "DROP TABLE IF EXISTS accounts")
+    await execute(db_dsn, "DROP TABLE IF EXISTS _meta")
+    await DB.close_all()
+
+    yield AccountsPool(db_dsn)
+
+    await DB.close_all()
 
 
 @pytest.fixture

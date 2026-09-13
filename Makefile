@@ -1,4 +1,4 @@
-.PHONY: prepare install update lint check test test-py test-sq test-matrix-py test-matrix-sq
+.PHONY: prepare install update lint check test test-py test-matrix-py
 
 prepare: lint check
 
@@ -22,18 +22,15 @@ check:
 	uv run ruff check .
 	uv run ty check
 
+# tests run against a real MySQL server; pass its url via DOVEXSCRAPE_DB
 test:
-	@uv run pytest -s --cov=twscrape tests/
+	@test -n "$$DOVEXSCRAPE_DB" || (echo "error: DOVEXSCRAPE_DB is not set"; exit 1)
+	@uv run pytest -s --cov=dovexscrape tests/
 
 test-py:
-	$(eval name=twscrape_py$(v))
+	$(eval name=dovexscrape_py$(v))
 	@docker -l warning build -f Dockerfile.py-matrix --build-arg VER=$(v) -t $(name) .
-	@docker run $(name)
-
-test-sq:
-	$(eval name=twscrape_sq$(v))
-	@docker -l warning build -f Dockerfile.sq-matrix --build-arg SQLY=$(y) --build-arg SQLV=$(v) -t $(name) .
-	@docker run $(name)
+	@docker run --network host -e DOVEXSCRAPE_DB $(name)
 
 test-matrix-py:
 	@make test-py v=3.10
@@ -41,15 +38,3 @@ test-matrix-py:
 	@make test-py v=3.12
 	@make test-py v=3.13
 	@make test-py v=3.14
-
-test-matrix-sq:
-	@# https://www.sqlite.org/chronology.html https://www.sqlite.org/download.html
-	@make test-sq y=2018 v=3240000
-# 	@make test-sq y=2019 v=3270200
-# 	@make test-sq y=2019 v=3300100
-# 	@make test-sq y=2020 v=3330000
-# 	@make test-sq y=2021 v=3340100
-# 	@make test-sq y=2023 v=3430000
-# 	@make test-sq y=2023 v=3440000
-# 	@make test-sq y=2024 v=3450300
-	@make test-sq y=2026 v=3530100

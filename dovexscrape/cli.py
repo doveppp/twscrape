@@ -5,13 +5,13 @@ import asyncio
 import getpass
 import io
 import json
-import sqlite3
+import os
 import sys
 from importlib.metadata import version
 
 from . import telemetry
 from .api import API, AccountsPool
-from .db import get_sqlite_version
+from .db import DB
 from .http import Response
 from .logger import logger, set_log_level
 from .login import LoginConfig
@@ -51,8 +51,7 @@ async def main(args):
         set_log_level("DEBUG")
 
     if args.command == "version":
-        print(f"twscrape: {version('twscrape')}")
-        print(f"SQLite runtime: {sqlite3.sqlite_version} ({await get_sqlite_version()})")
+        print(f"dovexscrape: {version('dovexscrape')}")
         return
 
     login_config = LoginConfig(getattr(args, "email_first", False), getattr(args, "manual", False))
@@ -80,7 +79,7 @@ async def main(args):
 
     if args.command == "add_accounts":
         await pool.load_from_file(args.file_path, args.line_format)
-        print("\nNow run:\ntwscrape login_accounts")
+        print("\nNow run:\ndovexscrape login_accounts")
         return
 
     if args.command == "add_cookie":
@@ -140,6 +139,7 @@ async def _run(args):
         await main(args)
     finally:
         await telemetry.flush()
+        await DB.close_all()
 
 
 def custom_help(p):
@@ -165,7 +165,11 @@ def custom_help(p):
 
 def run():
     p = argparse.ArgumentParser(add_help=False, formatter_class=CustomHelpFormatter)
-    p.add_argument("--db", default="accounts.db", help="Accounts database file")
+    p.add_argument(
+        "--db",
+        default=os.getenv("DOVEXSCRAPE_DB", "accounts.db"),
+        help="MySQL accounts database url, eg. mysql://user:pass@host:3306/db",
+    )
     p.add_argument("--debug", action="store_true", help="Enable debug mode")
     subparsers = p.add_subparsers(dest="command")
 

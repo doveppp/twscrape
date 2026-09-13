@@ -12,7 +12,7 @@ from typing import Any, Literal
 import httpx
 import machineid
 
-APP_NAME = "twscrape"
+APP_NAME = "dovexscrape"
 POSTHOG_KEY = "phc_giRHYHo4460O5UPxySajdO9L4KDRsjSmNQACA7uG9px"
 POSTHOG_BATCH_URL = "https://app.posthog.com/batch/"
 _lock = threading.Lock()
@@ -59,7 +59,7 @@ def current_source() -> str:
 
 
 def _is_disabled() -> bool:
-    return os.getenv("TWS_TELEMETRY") == "0" or os.getenv("DO_NOT_TRACK") == "1"
+    return os.getenv("DOVEXSCRAPE_TELEMETRY") == "0" or os.getenv("DO_NOT_TRACK") == "1"
 
 
 def capture(event: str, properties: dict[str, Any] | None = None) -> None:

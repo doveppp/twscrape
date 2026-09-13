@@ -1,15 +1,16 @@
 from collections import OrderedDict
 from contextlib import aclosing
+from unittest.mock import patch
 
 import pytest
 
-import twscrape.queue_client as queue_client_module
-from twscrape.account import Account
-from twscrape.accounts_pool import AccountsPool
-from twscrape.http import ConnectError, NetworkError
-from twscrape.queue_client import GqlFeaturesOutdatedError, QueueClient, XClIdGenStore
-from twscrape.utils import utc
-from twscrape.xclid import XClIdAccountError, XClIdGen, XClIdParseError
+import dovexscrape.queue_client as queue_client_module
+from dovexscrape.account import Account
+from dovexscrape.accounts_pool import AccountsPool
+from dovexscrape.http import ConnectError, NetworkError
+from dovexscrape.queue_client import GqlFeaturesOutdatedError, QueueClient, XClIdGenStore
+from dovexscrape.utils import utc
+from dovexscrape.xclid import XClIdAccountError, XClIdGen, XClIdParseError
 
 from .mock_http import MockClient
 
@@ -104,7 +105,7 @@ async def test_retry_with_same_acc_on_network_error(client_fixture: CF, monkeypa
     async def fake_sleep(secs):
         sleeps.append(secs)
 
-    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("dovexscrape.queue_client.asyncio.sleep", fake_sleep)
 
     await client.__aenter__()
     locked1 = await get_locked(pool)
@@ -132,7 +133,7 @@ async def test_network_error_rotates_account_after_3_failures(client_fixture: CF
     async def fake_sleep(secs):
         sleeps.append(secs)
 
-    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("dovexscrape.queue_client.asyncio.sleep", fake_sleep)
 
     await client.__aenter__()
     assert await get_locked(pool) == {"user1"}
@@ -161,7 +162,7 @@ async def test_network_error_counter_resets_on_account_change(client_fixture: CF
     async def fake_sleep(secs):
         pass
 
-    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("dovexscrape.queue_client.asyncio.sleep", fake_sleep)
 
     await client.__aenter__()
 
@@ -275,7 +276,7 @@ async def test_connect_error_cools_account_and_rotates_after_3_retries(
     async def fake_sleep(secs):
         sleeps.append(secs)
 
-    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("dovexscrape.queue_client.asyncio.sleep", fake_sleep)
 
     await client.__aenter__()
     assert await get_locked(pool) == {"user1"}
@@ -305,7 +306,7 @@ async def test_connect_error_recovers_before_3_retries(client_fixture: CF, monke
     async def fake_sleep(secs):
         pass
 
-    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("dovexscrape.queue_client.asyncio.sleep", fake_sleep)
 
     await client.__aenter__()
 
@@ -327,7 +328,7 @@ async def test_alternating_categories_trip_total_safety_net(client_fixture: CF, 
     async def fake_sleep(secs):
         pass
 
-    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("dovexscrape.queue_client.asyncio.sleep", fake_sleep)
 
     await client.__aenter__()
     assert await get_locked(pool) == {"user1"}
@@ -356,7 +357,7 @@ async def test_transport_error_retry_budget_is_per_account(client_fixture: CF, m
     async def fake_sleep(secs):
         pass
 
-    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("dovexscrape.queue_client.asyncio.sleep", fake_sleep)
 
     await client.__aenter__()
 
@@ -646,7 +647,7 @@ async def test_loadshed_without_data_retries_same_account(client_fixture: CF, mo
     async def fake_sleep(secs):
         sleeps.append(secs)
 
-    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("dovexscrape.queue_client.asyncio.sleep", fake_sleep)
     await client.__aenter__()
 
     mock.add_response(json={"errors": [{"code": -1, "message": "LoadShed: Unspecified"}]})
@@ -753,6 +754,9 @@ async def test_unknown_exception_retries_then_locks_account(client_fixture: CF):
 
     user1 = next(x for x in await pool.get_all() if x.username == "user1")
     assert "SearchTimeline" in user1.locks
+    # the failure is persisted and the account is frozen for every queue
+    assert user1.unknown_fail_count == 1
+    assert user1.global_locked_until is not None
 
     await client.__aexit__(None, None, None)
 
@@ -774,19 +778,91 @@ async def test_close_ctx_noop_when_ctx_is_none(pool_mock: AccountsPool):
     await client._close_ctx()
 
 
-async def test_404_retries_exhaust_and_abort(client_fixture: CF):
-    from unittest.mock import patch
+async def test_404_exhaust_locks_account_globally(pool_mock: AccountsPool, monkeypatch):
+    mock = MockClient()
+    monkeypatch.setattr(Account, "make_client", lambda self, proxy=None: mock)
 
-    pool, client, mock = client_fixture
-    await client.__aenter__()
+    pool = AccountsPool(pool_mock._db_file, wait_timeout=0)
+    await pool.add_account("user1", "pass1", "email1", "ep1", cookies="auth_token=t; ct0=c")
+    await pool.set_active("user1", True)
 
-    mock.add_response(status_code=404, json={})
-    mock.add_response(status_code=404, json={})
-    mock.add_response(status_code=404, json={})
+    for _ in range(3):
+        mock.add_response(status_code=404, json={})
 
-    with patch("twscrape.queue_client.asyncio.sleep"):
+    client = QueueClient(pool, "SearchTimeline")
+    with patch("dovexscrape.queue_client.asyncio.sleep"):
         rep = await client.get(URL)
+
     assert rep is None
+    acc = await pool.get("user1")
+    assert acc.active is True
+    assert acc.xclid_fail_count == 1
+    assert acc.global_locked_until is not None
+    # frozen for every queue, not only the one that failed
+    assert await pool.get_for_queue("TweetDetail") is None
+
+
+async def test_404_exhaust_deactivates_after_threshold(pool_mock: AccountsPool, monkeypatch):
+    mock = MockClient()
+    monkeypatch.setattr(Account, "make_client", lambda self, proxy=None: mock)
+
+    pool = AccountsPool(pool_mock._db_file, wait_timeout=0)
+    await pool.add_account("user1", "pass1", "email1", "ep1", cookies="auth_token=t; ct0=c")
+    await pool.set_active("user1", True)
+    await pool.incr_fail_count("user1", "xclid")
+    await pool.incr_fail_count("user1", "xclid")
+
+    for _ in range(3):
+        mock.add_response(status_code=404, json={})
+
+    client = QueueClient(pool, "SearchTimeline")
+    with patch("dovexscrape.queue_client.asyncio.sleep"):
+        rep = await client.get(URL)
+
+    assert rep is None
+    acc = await pool.get("user1")
+    assert acc.active is False
+    assert acc.xclid_fail_count == 0  # mark_inactive clears the counters
+    assert "x-client-transaction-id" in (acc.error_msg or "")
+
+
+async def test_unknown_error_deactivates_after_threshold(pool_mock: AccountsPool, monkeypatch):
+    mock = MockClient()
+    monkeypatch.setattr(Account, "make_client", lambda self, proxy=None: mock)
+
+    pool = AccountsPool(pool_mock._db_file, wait_timeout=0)
+    await pool.add_account("user1", "pass1", "email1", "ep1", cookies="auth_token=t; ct0=c")
+    await pool.set_active("user1", True)
+    await pool.incr_fail_count("user1", "unknown")
+    await pool.incr_fail_count("user1", "unknown")
+
+    mock.add_exception(RuntimeError("boom"))
+    mock.add_exception(RuntimeError("boom"))
+    mock.add_exception(RuntimeError("boom"))
+
+    client = QueueClient(pool, "SearchTimeline")
+    rep = await client.get(URL)
+
+    assert rep is None
+    acc = await pool.get("user1")
+    assert acc.active is False
+    assert acc.unknown_fail_count == 0  # mark_inactive clears the counters
+    assert "boom" in (acc.error_msg or "")
+
+
+async def test_success_resets_fail_counts(client_fixture: CF):
+    pool, client, mock = client_fixture
+    await pool.incr_fail_count("user1", "xclid")
+    await pool.incr_fail_count("user1", "unknown")
+
+    await client.__aenter__()
+    mock.add_response(json={"ok": True})
+    rep = await client.get(URL)
+    assert rep is not None
+
+    user1 = next(x for x in await pool.get_all() if x.username == "user1")
+    assert user1.xclid_fail_count == 0
+    assert user1.unknown_fail_count == 0
 
     await client.__aexit__(None, None, None)
 
@@ -807,7 +883,7 @@ async def test_404_refreshes_generator_and_retries(client_fixture: CF, monkeypat
         return None
 
     monkeypatch.setattr(XClIdGenStore, "get", classmethod(fake_get))
-    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("dovexscrape.queue_client.asyncio.sleep", no_sleep)
     mock.add_response(status_code=404, json={})
     mock.add_response(json={"ok": True})
 
@@ -991,7 +1067,7 @@ async def test_xclid_parse_error_aborts_without_account_state_change(
         raise XClIdParseError("Signing script not found (3/3 assets loaded)")
 
     monkeypatch.setattr(XClIdGenStore, "get", classmethod(fake_get))
-    monkeypatch.setattr("twscrape.queue_client.logger.error", messages.append)
+    monkeypatch.setattr("dovexscrape.queue_client.logger.error", messages.append)
 
     client = QueueClient(pool_mock, "SearchTimeline")
     rep = await client.get(URL)

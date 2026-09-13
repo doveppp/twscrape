@@ -15,7 +15,7 @@ def env_int(key: str | list[str], default: int) -> int:
     return val[0] if val else default
 
 
-TWS_WAIT_EMAIL_CODE = env_int(["TWS_WAIT_EMAIL_CODE", "LOGIN_CODE_TIMEOUT"], 30)
+DOVEXSCRAPE_WAIT_EMAIL_CODE = env_int(["DOVEXSCRAPE_WAIT_EMAIL_CODE", "LOGIN_CODE_TIMEOUT"], 30)
 
 
 class EmailLoginError(Exception):
@@ -87,8 +87,10 @@ async def imap_get_email_code(
             if code is not None:
                 return code
 
-            if time.time() - start_time > TWS_WAIT_EMAIL_CODE:
-                raise EmailCodeTimeoutError(f"Email code timeout ({TWS_WAIT_EMAIL_CODE} sec)")
+            if time.time() - start_time > DOVEXSCRAPE_WAIT_EMAIL_CODE:
+                raise EmailCodeTimeoutError(
+                    f"Email code timeout ({DOVEXSCRAPE_WAIT_EMAIL_CODE} sec)"
+                )
 
             await asyncio.sleep(5)
     except Exception as e:

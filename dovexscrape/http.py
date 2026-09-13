@@ -248,24 +248,24 @@ class CurlClient(HttpClient):
 
 
 def _detect_backend() -> str:
-    forced = os.getenv("TWS_HTTP_BACKEND", "").lower().strip()
+    forced = os.getenv("DOVEXSCRAPE_HTTP_BACKEND", "").lower().strip()
 
     if forced == "curl":
         if importlib.util.find_spec("curl_cffi") is None:
             raise ImportError(
-                "TWS_HTTP_BACKEND=curl but curl-cffi is not installed. "
-                "Run: pip install twscrape[curl]"
+                "DOVEXSCRAPE_HTTP_BACKEND=curl but curl-cffi is not installed. "
+                "Run: pip install dovexscrape[curl]"
             )
         return "curl"
 
     if forced in ("", "httpx"):
         if importlib.util.find_spec("httpx") is None:
             raise ImportError(
-                "TWS_HTTP_BACKEND=httpx but httpx is not installed. Run: pip install twscrape"
+                "DOVEXSCRAPE_HTTP_BACKEND=httpx but httpx is not installed. Run: pip install dovexscrape"
             )
         return "httpx"
 
-    raise ValueError(f"Invalid TWS_HTTP_BACKEND={forced!r}. Expected 'curl' or 'httpx'.")
+    raise ValueError(f"Invalid DOVEXSCRAPE_HTTP_BACKEND={forced!r}. Expected 'curl' or 'httpx'.")
 
 
 def make_client(

@@ -11,9 +11,9 @@ _TLOGLEVEL = Literal["TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 
 def _load_from_env() -> _TLOGLEVEL:
-    env = os.getenv("TWS_LOG_LEVEL", "INFO").upper()
+    env = os.getenv("DOVEXSCRAPE_LOG_LEVEL", "INFO").upper()
     if env not in ["TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]:
-        logger.warning(f"Invalid log level '{env}' in TWS_LOG_LEVEL. Defaulting to INFO.")
+        logger.warning(f"Invalid log level '{env}' in DOVEXSCRAPE_LOG_LEVEL. Defaulting to INFO.")
         return "INFO"
 
     return env

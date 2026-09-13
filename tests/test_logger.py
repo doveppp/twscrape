@@ -1,7 +1,7 @@
 import time
 from collections import OrderedDict
 
-from twscrape.logger import LogOnce, logger
+from dovexscrape.logger import LogOnce, logger
 
 
 def test_log_once_logs_each_key_once(monkeypatch):

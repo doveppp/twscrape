@@ -7,8 +7,8 @@ Regression tests for pagination bugs:
 import json
 import os
 
-from twscrape import API, gather
-from twscrape.queue_client import QueueClient
+from dovexscrape import API, gather
+from dovexscrape.queue_client import QueueClient
 
 BASE_DIR = os.path.dirname(__file__)
 DATA_DIR = os.path.join(BASE_DIR, "mocked-data")

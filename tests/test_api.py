@@ -2,9 +2,9 @@ import os
 
 import pytest
 
-from twscrape.accounts_pool import NoAccountError
-from twscrape.api import API
-from twscrape.utils import gather, get_env_bool
+from dovexscrape.accounts_pool import NoAccountError
+from dovexscrape.api import API
+from dovexscrape.utils import gather, get_env_bool
 
 
 class MockedError(Exception):
@@ -52,9 +52,9 @@ async def test_raise_when_no_account(api_mock: API):
     await api_mock.pool.delete_accounts(["user1"])
     assert len(await api_mock.pool.get_all()) == 0
 
-    assert get_env_bool("TWS_RAISE_WHEN_NO_ACCOUNT") is False
-    os.environ["TWS_RAISE_WHEN_NO_ACCOUNT"] = "1"
-    assert get_env_bool("TWS_RAISE_WHEN_NO_ACCOUNT") is True
+    assert get_env_bool("DOVEXSCRAPE_RAISE_WHEN_NO_ACCOUNT") is False
+    os.environ["DOVEXSCRAPE_RAISE_WHEN_NO_ACCOUNT"] = "1"
+    assert get_env_bool("DOVEXSCRAPE_RAISE_WHEN_NO_ACCOUNT") is True
 
     with pytest.raises(NoAccountError):
         await gather(api_mock.search("foo", limit=10))
@@ -62,5 +62,5 @@ async def test_raise_when_no_account(api_mock: API):
     with pytest.raises(NoAccountError):
         await api_mock.user_by_id(123)
 
-    del os.environ["TWS_RAISE_WHEN_NO_ACCOUNT"]
-    assert get_env_bool("TWS_RAISE_WHEN_NO_ACCOUNT") is False
+    del os.environ["DOVEXSCRAPE_RAISE_WHEN_NO_ACCOUNT"]
+    assert get_env_bool("DOVEXSCRAPE_RAISE_WHEN_NO_ACCOUNT") is False

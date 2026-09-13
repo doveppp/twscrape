@@ -1,16 +1,16 @@
-# twscrape
+# dovexscrape
 
 <div align="center">
 
-[<img src="https://badges.ws/pypi/v/twscrape" alt="version" />](https://pypi.org/project/twscrape)
-[<img src="https://badges.ws/pypi/python/twscrape" alt="py versions" />](https://pypi.org/project/twscrape)
-[<img src="https://badges.ws/pypi/dm/twscrape" alt="downloads" />](https://pypi.org/project/twscrape)
-[<img src="https://badges.ws/github/license/vladkens/twscrape" alt="license" />](https://github.com/vladkens/twscrape/blob/main/LICENSE)
+[<img src="https://badges.ws/pypi/v/dovexscrape" alt="version" />](https://pypi.org/project/dovexscrape)
+[<img src="https://badges.ws/pypi/python/dovexscrape" alt="py versions" />](https://pypi.org/project/dovexscrape)
+[<img src="https://badges.ws/pypi/dm/dovexscrape" alt="downloads" />](https://pypi.org/project/dovexscrape)
+[<img src="https://badges.ws/github/license/doveppp/dovexscrape" alt="license" />](https://github.com/doveppp/dovexscrape/blob/main/LICENSE)
 [<img src="https://badges.ws/badge/-/buy%20me%20a%20coffee/ff813f?icon=buymeacoffee&label" alt="donate" />](https://buymeacoffee.com/vladkens)
 
 </div>
 
-twscrape is an async Python library and CLI for X/Twitter Search and GraphQL endpoints. It runs on your own account pool, keeps sessions in SQLite, rotates accounts when an endpoint is rate-limited, and returns either parsed SNScrape-style models or raw API responses.
+dovexscrape is an async Python library and CLI for X/Twitter Search and GraphQL endpoints. It runs on your own account pool, keeps sessions in MySQL, rotates accounts when an endpoint is rate-limited, and returns either parsed SNScrape-style models or raw API responses.
 
 <div align="center">
   <img src=".github/example.png" alt="example of cli usage" height="400px">
@@ -19,16 +19,34 @@ twscrape is an async Python library and CLI for X/Twitter Search and GraphQL end
 ## Install
 
 ```bash
-pip install twscrape
+pip install dovexscrape
 ```
 
 `httpx` is the default HTTP backend. For browser-like TLS fingerprinting, install the optional `curl-cffi` backend:
 
 ```bash
-pip install "twscrape[curl]"
+pip install "dovexscrape[curl]"
 
-TWS_HTTP_BACKEND=curl twscrape user_by_login xdevelopers
+DOVEXSCRAPE_HTTP_BACKEND=curl dovexscrape user_by_login xdevelopers
 ```
+
+## Database
+
+Accounts, sessions, locks and rate-limit counters live in MySQL (8.0.19+), so several processes or
+machines can share a single account pool:
+
+```bash
+export DOVEXSCRAPE_DB="mysql://user:pass@host:3306/dovexscrape"
+dovexscrape accounts
+```
+
+Use `--db` to point a single run at another database. The schema (`accounts`, `_meta`) is created on
+first connect; tables created by older SQLite-based releases are not migrated, so start from a fresh
+database.
+
+Each connection pins the session time zone to UTC, so locks and rate-limit windows stay comparable
+even when the server runs with a different `time_zone`. MySQL 8's default `caching_sha2_password`
+authentication works out of the box (`cryptography` is installed as a dependency).
 
 ## Features
 
@@ -43,33 +61,33 @@ TWS_HTTP_BACKEND=curl twscrape user_by_login xdevelopers
 ## Sponsor
 
 <p align="center">
-  <a href="https://www.rapidproxy.io/?ref=twscrape">
+  <a href="https://www.rapidproxy.io/?ref=dovexscrape">
     <img src=".github/rapidproxy.jpg" alt="RapidProxy logo" width="460">
   </a>
 </p>
 
 <p align="center">
-  <a href="https://www.rapidproxy.io/?ref=twscrape"><strong>RapidProxy</strong></a> is a residential proxy platform with 90M+ real IPs across 200+ countries. It supports rotation, geo-targeting, and high concurrency to improve scraping success and reduce bans. Start your free trial today!
+  <a href="https://www.rapidproxy.io/?ref=dovexscrape"><strong>RapidProxy</strong></a> is a residential proxy platform with 90M+ real IPs across 200+ countries. It supports rotation, geo-targeting, and high concurrency to improve scraping success and reduce bans. Start your free trial today!
 </p>
 
 <p align="center">Discount Code: <code>RAPID10</code> to get 10% off.</p>
 
 ## Start With Cookies
 
-twscrape requires authorized X/Twitter accounts. The most stable setup is to add an account from browser cookies containing `auth_token` and `ct0`. The recommended way to export them from your current browser profile is [unjar](https://github.com/vladkens/unjar):
+dovexscrape requires authorized X/Twitter accounts. The most stable setup is to add an account from browser cookies containing `auth_token` and `ct0`. The recommended way to export them from your current browser profile is [unjar](https://github.com/vladkens/unjar):
 
 ```bash
-unjar x.com -f header | twscrape add_cookie my_account
-twscrape accounts
-twscrape search "from:xdevelopers lang:en" --limit=20
+unjar x.com -f header | dovexscrape add_cookie my_account
+dovexscrape accounts
+dovexscrape search "from:xdevelopers lang:en" --limit=20
 ```
 
-`my_account` is a local identifier; twscrape does not verify that it matches the X username stored in the cookies. Run the same command again to replace its saved session while preserving credentials, statistics, locks, and proxy settings.
+`my_account` is a local identifier; dovexscrape does not verify that it matches the X username stored in the cookies. Run the same command again to replace its saved session while preserving credentials, statistics, locks, and proxy settings.
 
 Alternatively, let the CLI prompt securely for cookies copied from x.com -> DevTools (F12) -> Application -> Cookies:
 
 ```bash
-twscrape add_cookie my_account
+dovexscrape add_cookie my_account
 ```
 
 Cookie accounts that include `auth_token` and `ct0` are activated immediately; no `login_accounts` step is needed.
@@ -82,11 +100,11 @@ X/Twitter's Terms of Service discourage using multiple accounts. Use this projec
 
 ```python
 import asyncio
-from twscrape import API, gather
+from dovexscrape import API, gather
 
 
 async def main():
-    api = API()  # or API("accounts.db")
+    api = API()  # or API("mysql://user:pass@host:3306/db")
 
     # Add once; the session is stored in the account database.
     await api.pool.add_account_cookies("my_account", "auth_token=xxx; ct0=yyy")
@@ -116,7 +134,7 @@ Configure what happens when no account is immediately available:
 api = API(raise_when_no_account=True, wait_timeout=30, wait_interval=1)
 ```
 
-`wait_timeout` limits how long to wait for a locked account, `wait_interval` controls how often the pool checks again, and `raise_when_no_account` raises `NoAccountError` instead of ending the operation. By default, twscrape waits indefinitely while active accounts are locked.
+`wait_timeout` limits how long to wait for a locked account, `wait_interval` controls how often the pool checks again, and `raise_when_no_account` raises `NoAccountError` instead of ending the operation. By default, dovexscrape waits indefinitely while active accounts are locked.
 
 Search defaults to the Latest tab. Pass `kv={"product": "Top"}` or `kv={"product": "Media"}` to use another search product:
 
@@ -217,48 +235,48 @@ Parsed `Tweet`, `User`, `Community`, and trend objects can be converted with `.d
 ## CLI
 
 ```bash
-twscrape
-twscrape search --help
+dovexscrape
+dovexscrape search --help
 ```
 
 Commands:
 
 ```bash
-twscrape search "QUERY" --limit=20
-twscrape tweet_details TWEET_ID
-twscrape tweet_replies TWEET_ID --limit=20
-twscrape tweet_thread TWEET_ID --limit=20
-twscrape retweeters TWEET_ID --limit=20
-twscrape user_by_id USER_ID
-twscrape user_by_login USERNAME
-twscrape user_about USERNAME
-twscrape user_media USER_ID --limit=20
-twscrape following USER_ID --limit=20
-twscrape followers USER_ID --limit=20
-twscrape verified_followers USER_ID --limit=20
-twscrape subscriptions USER_ID --limit=20
-twscrape user_tweets USER_ID --limit=20
-twscrape user_tweets_and_replies USER_ID --limit=20
-twscrape list_timeline LIST_ID --limit=20
-twscrape list_members LIST_ID --limit=20
-twscrape community_info COMMUNITY_ID
-twscrape community_members COMMUNITY_ID --limit=20
-twscrape community_moderators COMMUNITY_ID --limit=20
-twscrape community_tweets COMMUNITY_ID --limit=20
-twscrape trends sport
+dovexscrape search "QUERY" --limit=20
+dovexscrape tweet_details TWEET_ID
+dovexscrape tweet_replies TWEET_ID --limit=20
+dovexscrape tweet_thread TWEET_ID --limit=20
+dovexscrape retweeters TWEET_ID --limit=20
+dovexscrape user_by_id USER_ID
+dovexscrape user_by_login USERNAME
+dovexscrape user_about USERNAME
+dovexscrape user_media USER_ID --limit=20
+dovexscrape following USER_ID --limit=20
+dovexscrape followers USER_ID --limit=20
+dovexscrape verified_followers USER_ID --limit=20
+dovexscrape subscriptions USER_ID --limit=20
+dovexscrape user_tweets USER_ID --limit=20
+dovexscrape user_tweets_and_replies USER_ID --limit=20
+dovexscrape list_timeline LIST_ID --limit=20
+dovexscrape list_members LIST_ID --limit=20
+dovexscrape community_info COMMUNITY_ID
+dovexscrape community_members COMMUNITY_ID --limit=20
+dovexscrape community_moderators COMMUNITY_ID --limit=20
+dovexscrape community_tweets COMMUNITY_ID --limit=20
+dovexscrape trends sport
 ```
 
 CLI output is JSON Lines: one document per line.
 
 ```bash
-twscrape search "elon musk lang:es" --limit=20 > tweets.jsonl
-twscrape search "elon musk lang:es" --limit=20 --raw
+dovexscrape search "elon musk lang:es" --limit=20 > tweets.jsonl
+dovexscrape search "elon musk lang:es" --limit=20 --raw
 ```
 
 Use a separate account database when you need isolated account pools:
 
 ```bash
-twscrape --db research.db search "python lang:en" --limit=100
+dovexscrape --db "mysql://user:pass@host:3306/research" search "python lang:en" --limit=100
 ```
 
 ## Accounts
@@ -266,11 +284,11 @@ twscrape --db research.db search "python lang:en" --limit=100
 Add username/password accounts from a file:
 
 ```bash
-twscrape add_accounts ./accounts.txt username:password:email:email_password
-twscrape login_accounts
+dovexscrape add_accounts ./accounts.txt username:password:email:email_password
+dovexscrape login_accounts
 ```
 
-`twscrape login_accounts` starts the login flow for each inactive account. If X asks for email verification and `email_password` is available, twscrape tries to read the code through IMAP and saves the resulting cookies for later use.
+`dovexscrape login_accounts` starts the login flow for each inactive account. If X asks for email verification and `email_password` is available, dovexscrape tries to read the code through IMAP and saves the resulting cookies for later use.
 
 `line_format` describes how each line is split. Supported tokens:
 
@@ -290,30 +308,30 @@ username:password:email:email password:user_agent:cookies
 Command:
 
 ```bash
-twscrape add_accounts ./accounts.txt username:password:email:email_password:_:cookies
+dovexscrape add_accounts ./accounts.txt username:password:email:email_password:_:cookies
 ```
 
 If IMAP is unavailable, enter verification codes manually:
 
 ```bash
-twscrape login_accounts --manual
-twscrape relogin user1 user2 --manual
-twscrape relogin_failed --manual
+dovexscrape login_accounts --manual
+dovexscrape relogin user1 user2 --manual
+dovexscrape relogin_failed --manual
 ```
 
 Inspect and maintain the pool:
 
 ```bash
-twscrape accounts
-twscrape stats
-twscrape relogin user1 user2
-twscrape relogin_failed
-twscrape reset_locks
-twscrape delete_inactive
-twscrape del_accounts user1 user2
+dovexscrape accounts
+dovexscrape stats
+dovexscrape relogin user1 user2
+dovexscrape relogin_failed
+dovexscrape reset_locks
+dovexscrape delete_inactive
+dovexscrape del_accounts user1 user2
 ```
 
-`twscrape accounts` prints the current account state:
+`dovexscrape accounts` prints the current account state:
 
 ```text
 username  logged_in  active  last_used            total_req  error_msg
@@ -326,7 +344,7 @@ user3     False      False   None                 120        Login error
 
 `limit` is the target number of parsed objects, not a page size. X/Twitter controls page size per endpoint, so a call can return fewer or more objects than requested.
 
-Rate limits are tracked per account and per endpoint. When an account is limited for one operation, twscrape locks it for that operation until the reset time and tries another active account.
+Rate limits are tracked per account and per endpoint. When an account is limited for one operation, dovexscrape locks it for that operation until the reset time and tries another active account.
 
 `user_tweets` and `user_tweets_and_replies` are limited by X/Twitter to about 3200 tweets.
 
@@ -348,29 +366,30 @@ doc = await api.user_by_login("xdevelopers")
 ```
 
 ```bash
-TWS_PROXY=socks5://user:pass@127.0.0.1:1080 twscrape user_by_login xdevelopers
+DOVEXSCRAPE_PROXY=socks5://user:pass@127.0.0.1:1080 dovexscrape user_by_login xdevelopers
 ```
 
 Proxy priority:
 
 1. `api.proxy`
-2. `TWS_PROXY`
+2. `DOVEXSCRAPE_PROXY`
 3. account proxy
 
-Do not set `api.proxy` or `TWS_PROXY` when you want per-account proxies to be used.
+Do not set `api.proxy` or `DOVEXSCRAPE_PROXY` when you want per-account proxies to be used.
 
 ## Environment
 
-- `TWS_PROXY` - global proxy for all accounts
-- `TWS_WAIT_EMAIL_CODE` - email verification timeout in seconds, default `30`
-- `TWS_RAISE_WHEN_NO_ACCOUNT` - raise `NoAccountError` instead of waiting; accepts `false`, `0`, `true`, `1`
-- `TWS_HTTP_BACKEND` - `httpx` or `curl`
-- `TWS_LOG_LEVEL` - logger level, default `INFO`
-- `TWS_TELEMETRY=0` - disable anonymous telemetry
+- `DOVEXSCRAPE_DB` - default MySQL url for accounts, eg. `mysql://user:pass@host:3306/db`
+- `DOVEXSCRAPE_PROXY` - global proxy for all accounts
+- `DOVEXSCRAPE_WAIT_EMAIL_CODE` - email verification timeout in seconds, default `30`
+- `DOVEXSCRAPE_RAISE_WHEN_NO_ACCOUNT` - raise `NoAccountError` instead of waiting; accepts `false`, `0`, `true`, `1`
+- `DOVEXSCRAPE_HTTP_BACKEND` - `httpx` or `curl`
+- `DOVEXSCRAPE_LOG_LEVEL` - logger level, default `INFO`
+- `DOVEXSCRAPE_TELEMETRY=0` - disable anonymous telemetry
 
 ## Telemetry
 
-twscrape collects anonymous, aggregated telemetry about used GraphQL operation names and the selected HTTP backend. It does not collect usernames, cookies, proxies, queries, request URLs, or response bodies. Disable it with `TWS_TELEMETRY=0`.
+dovexscrape collects anonymous, aggregated telemetry about used GraphQL operation names and the selected HTTP backend. It does not collect usernames, cookies, proxies, queries, request URLs, or response bodies. Disable it with `DOVEXSCRAPE_TELEMETRY=0`.
 
 ## See Also
 

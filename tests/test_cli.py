@@ -4,11 +4,14 @@ import json
 
 import pytest
 
+from dovexscrape import cli
 from tests.test_parser import fake_rep
-from twscrape import cli
+
+# cli.main() never connects for these commands (the pool is lazy), so a placeholder is enough
+DB_URL = "mysql://user:pass@127.0.0.1:3306/dovexscrape_test"
 
 
-async def test_add_cookie_uses_arg_cookies(tmp_path, monkeypatch):
+async def test_add_cookie_uses_arg_cookies(monkeypatch):
     called = {}
 
     async def mock_add_account_cookies(self, username, cookies):
@@ -20,7 +23,7 @@ async def test_add_cookie_uses_arg_cookies(tmp_path, monkeypatch):
     args = argparse.Namespace(
         command="add_cookie",
         debug=False,
-        db=str(tmp_path / "test.db"),
+        db=DB_URL,
         email_first=False,
         manual=False,
         username="user1",
@@ -32,7 +35,7 @@ async def test_add_cookie_uses_arg_cookies(tmp_path, monkeypatch):
     assert called == {"username": "user1", "cookies": "auth_token=token; ct0=csrf"}
 
 
-async def test_add_cookie_prompts_securely_when_missing(tmp_path, monkeypatch):
+async def test_add_cookie_prompts_securely_when_missing(monkeypatch):
     called = {}
 
     async def mock_add_account_cookies(self, username, cookies):
@@ -50,7 +53,7 @@ async def test_add_cookie_prompts_securely_when_missing(tmp_path, monkeypatch):
     args = argparse.Namespace(
         command="add_cookie",
         debug=False,
-        db=str(tmp_path / "test.db"),
+        db=DB_URL,
         email_first=False,
         manual=False,
         username="user1",
@@ -66,7 +69,7 @@ async def test_add_cookie_prompts_securely_when_missing(tmp_path, monkeypatch):
     }
 
 
-async def test_add_cookie_reads_stdin(tmp_path, monkeypatch):
+async def test_add_cookie_reads_stdin(monkeypatch):
     called = {}
 
     async def mock_add_account_cookies(self, username, cookies):
@@ -79,7 +82,7 @@ async def test_add_cookie_reads_stdin(tmp_path, monkeypatch):
     args = argparse.Namespace(
         command="add_cookie",
         debug=False,
-        db=str(tmp_path / "test.db"),
+        db=DB_URL,
         email_first=False,
         manual=False,
         username="user1",
@@ -91,7 +94,7 @@ async def test_add_cookie_reads_stdin(tmp_path, monkeypatch):
     assert called == {"username": "user1", "cookies": "auth_token=token; ct0=csrf"}
 
 
-async def test_add_accounts_prints_next_step(tmp_path, monkeypatch, capsys):
+async def test_add_accounts_prints_next_step(monkeypatch, capsys):
     called = {}
 
     async def mock_load_from_file(self, file_path, line_format):
@@ -103,7 +106,7 @@ async def test_add_accounts_prints_next_step(tmp_path, monkeypatch, capsys):
     args = argparse.Namespace(
         command="add_accounts",
         debug=False,
-        db=str(tmp_path / "test.db"),
+        db=DB_URL,
         email_first=False,
         manual=False,
         file_path="accounts.txt",
@@ -117,10 +120,10 @@ async def test_add_accounts_prints_next_step(tmp_path, monkeypatch, capsys):
         "file_path": "accounts.txt",
         "line_format": "username:password:email:email_password",
     }
-    assert "twscrape login_accounts" in out
+    assert "dovexscrape login_accounts" in out
 
 
-async def test_search_prints_parsed_tweets(tmp_path, monkeypatch, capsys):
+async def test_search_prints_parsed_tweets(monkeypatch, capsys):
     async def mock_search_raw(self, q, limit=-1, kv=None):
         yield fake_rep("raw_search")
 
@@ -129,7 +132,7 @@ async def test_search_prints_parsed_tweets(tmp_path, monkeypatch, capsys):
     args = argparse.Namespace(
         command="search",
         debug=False,
-        db=str(tmp_path / "test.db"),
+        db=DB_URL,
         email_first=False,
         manual=False,
         raw=False,
@@ -147,7 +150,7 @@ async def test_search_prints_parsed_tweets(tmp_path, monkeypatch, capsys):
     assert doc["user"]["username"] is not None
 
 
-async def test_user_by_id_prints_parsed_user(tmp_path, monkeypatch, capsys):
+async def test_user_by_id_prints_parsed_user(monkeypatch, capsys):
     async def mock_user_by_id_raw(self, uid, kv=None):
         return fake_rep("raw_user_by_id")
 
@@ -156,7 +159,7 @@ async def test_user_by_id_prints_parsed_user(tmp_path, monkeypatch, capsys):
     args = argparse.Namespace(
         command="user_by_id",
         debug=False,
-        db=str(tmp_path / "test.db"),
+        db=DB_URL,
         email_first=False,
         manual=False,
         raw=False,
@@ -171,7 +174,7 @@ async def test_user_by_id_prints_parsed_user(tmp_path, monkeypatch, capsys):
     assert doc["username"] == "XDevelopers"
 
 
-async def test_user_by_login_prints_parsed_user(tmp_path, monkeypatch, capsys):
+async def test_user_by_login_prints_parsed_user(monkeypatch, capsys):
     async def mock_user_by_login_raw(self, login, kv=None):
         return fake_rep("raw_user_by_login")
 
@@ -180,7 +183,7 @@ async def test_user_by_login_prints_parsed_user(tmp_path, monkeypatch, capsys):
     args = argparse.Namespace(
         command="user_by_login",
         debug=False,
-        db=str(tmp_path / "test.db"),
+        db=DB_URL,
         email_first=False,
         manual=False,
         raw=False,
@@ -195,7 +198,7 @@ async def test_user_by_login_prints_parsed_user(tmp_path, monkeypatch, capsys):
     assert doc["username"] == "XDevelopers"
 
 
-async def test_tweet_details_raw_prints_raw_json(tmp_path, monkeypatch, capsys):
+async def test_tweet_details_raw_prints_raw_json(monkeypatch, capsys):
     async def mock_tweet_details_raw(self, twid, kv=None):
         return fake_rep("raw_tweet_details")
 
@@ -204,7 +207,7 @@ async def test_tweet_details_raw_prints_raw_json(tmp_path, monkeypatch, capsys):
     args = argparse.Namespace(
         command="tweet_details",
         debug=False,
-        db=str(tmp_path / "test.db"),
+        db=DB_URL,
         email_first=False,
         manual=False,
         raw=True,

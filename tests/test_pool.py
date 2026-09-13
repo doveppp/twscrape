@@ -1,8 +1,8 @@
 import pytest
 
-from twscrape.accounts_pool import AccountsPool, NoAccountError
-from twscrape.api import API
-from twscrape.utils import utc
+from dovexscrape.accounts_pool import AccountsPool, NoAccountError
+from dovexscrape.api import API
+from dovexscrape.utils import utc
 
 
 async def test_add_accounts(pool_mock: AccountsPool):
@@ -290,7 +290,7 @@ async def test_get_for_queue_or_wait_raises_when_flag_set(pool_mock: AccountsPoo
 
 
 async def test_get_for_queue_or_wait_raises_via_env(pool_mock: AccountsPool, monkeypatch):
-    monkeypatch.setenv("TWS_RAISE_WHEN_NO_ACCOUNT", "1")
+    monkeypatch.setenv("DOVEXSCRAPE_RAISE_WHEN_NO_ACCOUNT", "1")
     with pytest.raises(NoAccountError):
         await pool_mock.get_for_queue_or_wait("TestQueue")
 
@@ -308,7 +308,7 @@ async def test_get_for_queue_or_wait_waits_for_locked_account(pool_mock: Account
         intervals.append(interval)
         await pool.unlock("user1", queue)
 
-    monkeypatch.setattr("twscrape.accounts_pool.asyncio.sleep", release_account)
+    monkeypatch.setattr("dovexscrape.accounts_pool.asyncio.sleep", release_account)
 
     account = await pool.get_for_queue_or_wait(queue)
 
@@ -335,7 +335,7 @@ async def test_get_for_queue_or_wait_does_not_wait_without_active_accounts(
     async def fail_if_called(_):
         pytest.fail("should not wait when no accounts are active")
 
-    monkeypatch.setattr("twscrape.accounts_pool.asyncio.sleep", fail_if_called)
+    monkeypatch.setattr("dovexscrape.accounts_pool.asyncio.sleep", fail_if_called)
 
     assert await pool.get_for_queue_or_wait("TestQueue") is None
 
@@ -345,6 +345,101 @@ def test_api_passes_wait_config_to_new_pool(tmp_path):
 
     assert api.pool._wait_timeout == 1
     assert api.pool._wait_interval == 0.1
+
+
+async def test_incr_and_reset_fail_count(pool_mock: AccountsPool):
+    await pool_mock.add_account("user1", "pass1", "email1", "ep1")
+
+    assert await pool_mock.incr_fail_count("user1", "xclid") == 1
+    assert await pool_mock.incr_fail_count("user1", "xclid") == 2
+    assert await pool_mock.incr_fail_count("user1", "unknown") == 1
+
+    acc = await pool_mock.get("user1")
+    assert acc.xclid_fail_count == 2
+    assert acc.unknown_fail_count == 1
+
+    await pool_mock.reset_fail_count("user1", "xclid")
+    acc = await pool_mock.get("user1")
+    assert acc.xclid_fail_count == 0
+    assert acc.unknown_fail_count == 1
+
+
+async def test_lock_global_blocks_every_queue(pool_mock: AccountsPool):
+    await pool_mock.add_account("user1", "pass1", "email1", "ep1")
+    await pool_mock.set_active("user1", True)
+
+    await pool_mock.lock_global("user1", utc.ts() + 3600)
+    acc = await pool_mock.get("user1")
+    assert acc.global_locked_until is not None
+
+    assert await pool_mock.get_for_queue("SearchTimeline") is None
+    assert await pool_mock.get_for_queue("TweetDetail") is None
+
+    # expired global locks must not block picking
+    await pool_mock.lock_global("user1", utc.ts() - 1)
+    assert await pool_mock.get_for_queue("SearchTimeline") is not None
+
+
+async def test_next_available_at_counts_global_lock(pool_mock: AccountsPool):
+    Q = "SearchTimeline"
+    await pool_mock.add_account("user1", "pass1", "email1", "ep1")
+    await pool_mock.set_active("user1", True)
+
+    # frozen for every queue: the account still exists, so waiting is worthwhile
+    await pool_mock.lock_global("user1", utc.ts() + 3600)
+
+    result = await pool_mock.next_available_at(Q)
+    assert result is not None
+    assert result != "now"
+
+
+async def test_mark_inactive_resets_fail_counts(pool_mock: AccountsPool):
+    await pool_mock.add_account("user1", "pass1", "email1", "ep1")
+    await pool_mock.set_active("user1", True)
+    await pool_mock.incr_fail_count("user1", "xclid")
+    await pool_mock.incr_fail_count("user1", "unknown")
+
+    await pool_mock.mark_inactive("user1", "banned by system")
+
+    acc = await pool_mock.get("user1")
+    assert acc.active is False
+    assert acc.error_msg == "banned by system"
+    assert acc.xclid_fail_count == 0
+    assert acc.unknown_fail_count == 0
+
+
+async def test_reset_locks_clears_global_lock_and_fail_counts(pool_mock: AccountsPool):
+    Q = "TestQueue"
+    await pool_mock.add_account("user1", "pass1", "email1", "ep1")
+    await pool_mock.set_active("user1", True)
+
+    await pool_mock.get_for_queue(Q)
+    await pool_mock.lock_global("user1", utc.ts() + 3600)
+    await pool_mock.incr_fail_count("user1", "xclid")
+
+    await pool_mock.reset_locks()
+
+    acc = await pool_mock.get("user1")
+    assert acc.locks == {}
+    assert acc.global_locked_until is None
+    assert acc.xclid_fail_count == 0
+
+
+async def test_relogin_clears_global_lock_and_fail_counts(pool_mock: AccountsPool, monkeypatch):
+    await pool_mock.add_account("user1", "pass1", "email1", "ep1")
+    await pool_mock.set_active("user1", True)
+    await pool_mock.lock_global("user1", utc.ts() + 3600)
+    await pool_mock.incr_fail_count("user1", "unknown")
+
+    async def fake_login(account):
+        return True
+
+    monkeypatch.setattr(pool_mock, "login", fake_login)
+    await pool_mock.relogin("user1")
+
+    acc = await pool_mock.get("user1")
+    assert acc.global_locked_until is None
+    assert acc.unknown_fail_count == 0
 
 
 async def test_accounts_info_active_first(pool_mock: AccountsPool):

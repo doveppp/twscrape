@@ -1,6 +1,6 @@
 import pytest
 
-from twscrape import telemetry
+from dovexscrape import telemetry
 
 URL = "https://x.com/i/api/graphql/id/SearchTimeline"
 
@@ -8,7 +8,7 @@ URL = "https://x.com/i/api/graphql/id/SearchTimeline"
 @pytest.fixture(autouse=True)
 def allow_telemetry(monkeypatch):
     monkeypatch.delenv("DO_NOT_TRACK", raising=False)
-    monkeypatch.delenv("TWS_TELEMETRY", raising=False)
+    monkeypatch.delenv("DOVEXSCRAPE_TELEMETRY", raising=False)
 
 
 def telemetry_events():
@@ -46,14 +46,14 @@ async def test_telemetry_tracks_gql_request(client_fixture):
     )
 
     assert event["count"] == 1
-    assert event["properties"]["$lib"] == "twscrape"
+    assert event["properties"]["$lib"] == "dovexscrape"
     assert event["properties"]["$process_person_profile"] is False
     assert event["properties"]["$session_id"]
     assert event["properties"]["distinct_id"]
     assert event["properties"]["app_version"]
     assert event["properties"]["platform"]
     assert event["properties"]["python"]
-    assert event["properties"]["$current_url"] == "lib://twscrape/gql/SearchTimeline"
+    assert event["properties"]["$current_url"] == "lib://dovexscrape/gql/SearchTimeline"
 
 
 async def test_telemetry_tracks_cli_source_on_gql_request(client_fixture):
@@ -76,14 +76,14 @@ async def test_telemetry_tracks_cli_source_on_gql_request(client_fixture):
     )
 
     assert event["count"] == 1
-    assert event["properties"]["$lib"] == "twscrape"
+    assert event["properties"]["$lib"] == "dovexscrape"
     assert event["properties"]["$process_person_profile"] is False
     assert event["properties"]["$session_id"]
     assert event["properties"]["distinct_id"]
     assert event["properties"]["app_version"]
     assert event["properties"]["platform"]
     assert event["properties"]["python"]
-    assert event["properties"]["$current_url"] == "cli://twscrape/gql/SearchTimeline"
+    assert event["properties"]["$current_url"] == "cli://dovexscrape/gql/SearchTimeline"
 
 
 def test_telemetry_capture_aggregates_events():
@@ -92,7 +92,7 @@ def test_telemetry_capture_aggregates_events():
 
     event = find_event("gql_request", operation="SearchTimeline", http_backend="httpx")
     assert event["count"] == 2
-    assert event["properties"]["$lib"] == "twscrape"
+    assert event["properties"]["$lib"] == "dovexscrape"
     assert event["properties"]["$process_person_profile"] is False
     assert event["properties"]["$session_id"]
     assert event["properties"]["distinct_id"]
@@ -115,7 +115,7 @@ def test_telemetry_aggregation_ignores_identity_properties(monkeypatch):
 
 
 def test_telemetry_respects_opt_out(monkeypatch):
-    monkeypatch.setenv("TWS_TELEMETRY", "0")
+    monkeypatch.setenv("DOVEXSCRAPE_TELEMETRY", "0")
     telemetry.capture("gql_request", {"operation": "SearchTimeline"})
     assert telemetry.snapshot() == []
 
