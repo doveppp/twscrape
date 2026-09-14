@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from enum import Enum, auto
 from typing import Any
 from urllib.parse import urlparse
@@ -36,6 +38,8 @@ UNKNOWN_FAIL_DEACTIVATE_THRESHOLD = 3
 UNKNOWN_FAIL_LOCK_SECONDS = 60 * 15
 # Lock duration applied to an account when X serves a logged-out web build (seconds).
 XCLID_ACCOUNT_FAIL_LOCK_SECONDS = 60 * 15
+# Upper bound for honouring a Retry-After header on an edge (Cloudflare) rate limit.
+BLOCKED_MAX_SLEEP_SECONDS = 60 * 10
 
 
 class HandledError(Exception): ...
@@ -48,6 +52,14 @@ class XClIdRetryExhaustedError(Exception):
     """HTTP 404 persists after 3 retries with a fresh x-client-transaction-id."""
 
 
+class BlockedError(Exception):
+    """Edge (Cloudflare) rate limit: retryable after a backoff, unlike a hard block."""
+
+    def __init__(self, msg: str, retry_after: float | None = None):
+        super().__init__(msg)
+        self.retry_after = retry_after
+
+
 class GqlFeaturesOutdatedError(AbortReqError):
     """GQL_FEATURES in api.py no longer matches the X API. Retrying cannot help."""
 
@@ -55,6 +67,7 @@ class GqlFeaturesOutdatedError(AbortReqError):
 class FailKind(Enum):
     TRANSPORT = auto()
     LOADSHED = auto()
+    BLOCKED = auto()
     UNKNOWN = auto()
 
 
@@ -83,7 +96,7 @@ class Ctx:
         self.acc = acc
         self.clt = clt
         self.proxy = proxy
-        self.fails = {FailKind.TRANSPORT: 0, FailKind.LOADSHED: 0, FailKind.UNKNOWN: 0}
+        self.fails = dict.fromkeys(FailKind, 0)
 
     def fail(self, kind: FailKind) -> bool:
         """Count a failed attempt of this kind, return whether it's still worth retrying."""
@@ -91,11 +104,11 @@ class Ctx:
         self.fails[kind] += 1
         return self.fails[kind] < fail_limit and sum(self.fails.values()) < total_fail_limit
 
-    async def retry(self, kind: FailKind) -> bool:
+    async def retry(self, kind: FailKind, delay: float | None = None) -> bool:
         """Count a failure and back off while retry budget remains."""
         if not self.fail(kind):
             return False
-        await asyncio.sleep(2 ** self.fails[kind])
+        await asyncio.sleep(delay if delay is not None else 2 ** self.fails[kind])
         return True
 
     async def aclose(self):
@@ -150,6 +163,25 @@ def has_data(rep: Response, res: Any) -> bool:
 
 def has_error(errors: list[str], prefix: str) -> bool:
     return any(error.startswith(prefix) for error in errors)
+
+
+def _retry_after_seconds(rep: Response) -> float | None:
+    """Read a Retry-After header (delta-seconds or HTTP-date), capped and clamped to >= 0."""
+    value = rep.headers.get("retry-after")
+    if not value:
+        return None
+
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        when = when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
+        seconds = (when - utc.now()).total_seconds()
+
+    return min(max(seconds, 0.0), BLOCKED_MAX_SLEEP_SECONDS)
 
 
 def dump_rep(rep: Response):
@@ -256,6 +288,9 @@ class QueueClient:
         if "text/html" in rep.headers.get("content-type", "") and rep.status_code >= 400:
             src = "Cloudflare" if "cf-ray" in rep.headers else "HTML"
             logger.warning(f"Blocked by {src}: {rep.status_code} - {req_id(rep)}")
+            if rep.status_code == 429:
+                # Edge rate limit, not an account problem: back off and retry the same account
+                raise BlockedError(f"Blocked by {src}: 429", _retry_after_seconds(rep))
             raise AbortReqError()
 
         try:
@@ -415,6 +450,14 @@ class QueueClient:
             except HandledError:
                 # retry with new account
                 continue
+            except BlockedError as e:
+                # rotating accounts does not help an edge-level limit, so wait it out first
+                if await ctx.retry(FailKind.BLOCKED, delay=e.retry_after):
+                    logger.info(f"Retrying after edge rate limit; delay={e.retry_after}")
+                    continue
+
+                logger.error(f"Edge rate limit persists; aborting {method} {url}")
+                return
             except XClIdAccountError as e:
                 # A logged-out session is an account-level problem: count it together with the
                 # other x-client-transaction-id failures and freeze the account for every queue

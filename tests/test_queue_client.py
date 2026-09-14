@@ -503,6 +503,89 @@ async def test_html_block_without_cf_returns_none(client_fixture: CF):
     await client.__aexit__(None, None, None)
 
 
+CF_429 = {"content-type": "text/html", "cf-ray": "abc123"}
+
+
+async def test_cloudflare_429_sleeps_retry_after_then_retries_same_account(
+    client_fixture: CF, monkeypatch
+):
+    pool, client, mock = client_fixture
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("dovexscrape.queue_client.asyncio.sleep", fake_sleep)
+    await client.__aenter__()
+
+    mock.add_response(
+        status_code=429,
+        text="<html>rate limited</html>",
+        headers={**CF_429, "retry-after": "7"},
+    )
+    mock.add_response(json={"ok": True})
+
+    rep = await client.get(URL)
+    assert rep is not None
+    assert rep.json() == {"ok": True}
+    assert sleeps == [7.0]
+    assert getattr(rep, "__username") == "user1"  # same account, not rotated
+
+    # an edge limit must not penalise the account
+    user1 = next(x for x in await pool.get_all() if x.username == "user1")
+    assert user1.active is True
+    assert user1.xclid_fail_count == 0
+    assert user1.unknown_fail_count == 0
+    await client.__aexit__(None, None, None)
+
+
+async def test_cloudflare_429_backs_off_exponentially_without_retry_after(
+    client_fixture: CF, monkeypatch
+):
+    pool, client, mock = client_fixture
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("dovexscrape.queue_client.asyncio.sleep", fake_sleep)
+    await client.__aenter__()
+
+    mock.add_response(status_code=429, text="<html>limited</html>", headers=CF_429)
+    mock.add_response(status_code=429, text="<html>limited</html>", headers=CF_429)
+    mock.add_response(json={"ok": True})
+
+    rep = await client.get(URL)
+    assert rep is not None
+    assert sleeps == [2, 4]
+    await client.__aexit__(None, None, None)
+
+
+async def test_cloudflare_429_gives_up_when_retry_budget_is_exhausted(
+    client_fixture: CF, monkeypatch
+):
+    pool, client, mock = client_fixture
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("dovexscrape.queue_client.asyncio.sleep", fake_sleep)
+    await client.__aenter__()
+
+    for _ in range(3):
+        mock.add_response(status_code=429, text="<html>limited</html>", headers=CF_429)
+
+    rep = await client.get(URL)
+    assert rep is None
+    assert sleeps == [2, 4]
+
+    await client.__aexit__(None, None, None)
+    user1 = next(x for x in await pool.get_all() if x.username == "user1")
+    assert user1.active is True
+    assert "SearchTimeline" not in user1.locks
+
+
 # --- _check_rep branches ---
 
 
