@@ -18,6 +18,7 @@ from .models import (
     parse_users,
 )
 from .queue_client import QueueClient
+from .ratelimit import configure_rate_limit
 from .utils import encode_params, find_obj, get_by_path
 
 # GraphQL operation IDs used by this module.
@@ -108,7 +109,12 @@ class API:
         raise_when_no_account=False,
         wait_timeout: float | None = None,
         wait_interval: float = 5.0,
+        rate_limit: float | str | None = None,
     ):
+        # process-wide: applies to every API/QueueClient in this process, eg. 5 or "5/s";
+        # None keeps whatever the environment or the default installed, 0/"off" disables
+        configure_rate_limit(rate_limit)
+
         if isinstance(pool, AccountsPool):
             self.pool = pool
         elif isinstance(pool, str):

@@ -48,6 +48,19 @@ Each connection pins the session time zone to UTC, so locks and rate-limit windo
 even when the server runs with a different `time_zone`. MySQL 8's default `caching_sha2_password`
 authentication works out of the box (`cryptography` is installed as a dependency).
 
+## Rate limit
+
+All accounts and queues in a process share one request ceiling, evenly spaced rather than
+bursting, which keeps the API and its edge (Cloudflare) calm:
+
+```bash
+DOVEXSCRAPE_RATE_LIMIT=2 dovexscrape search "python lang:en" --limit=100
+```
+
+The default is `5` requests per second; use `off` (or `0`) to disable it. The same value can be
+set per client with `API(rate_limit="2/s")`. The ceiling covers GraphQL calls, including retries;
+the login flow and the `x-client-transaction-id` page fetches are not limited.
+
 ## Features
 
 - Search and GraphQL X/Twitter API methods
@@ -380,6 +393,7 @@ Do not set `api.proxy` or `DOVEXSCRAPE_PROXY` when you want per-account proxies 
 ## Environment
 
 - `DOVEXSCRAPE_DB` - default MySQL url for accounts, eg. `mysql://user:pass@host:3306/db`
+- `DOVEXSCRAPE_RATE_LIMIT` - process-wide request ceiling, default `5` (req/s); accepts `5`, `5/s`, or `off`/`0` to disable
 - `DOVEXSCRAPE_PROXY` - global proxy for all accounts
 - `DOVEXSCRAPE_WAIT_EMAIL_CODE` - email verification timeout in seconds, default `30`
 - `DOVEXSCRAPE_RAISE_WHEN_NO_ACCOUNT` - raise `NoAccountError` instead of waiting; accepts `false`, `0`, `true`, `1`

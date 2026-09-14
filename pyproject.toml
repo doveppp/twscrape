@@ -17,6 +17,7 @@ classifiers = [
   'Programming Language :: Python :: 3.14',
 ]
 dependencies = [
+  "aiolimiter>=1.2",
   "asyncmy>=0.2.9",
   # MySQL 8 default auth (caching_sha2_password) over a plaintext connection
   "cryptography>=42.0.0",

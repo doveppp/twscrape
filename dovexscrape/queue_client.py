@@ -20,6 +20,7 @@ from .http import (
     format_error,
 )
 from .logger import LogOnce, logger
+from .ratelimit import rate_limiter
 from .utils import utc
 from .xclid import XClIdAccountError, XClIdGen, XClIdParseError
 
@@ -128,14 +129,14 @@ class Ctx:
                 fresh=tries > 0,
             )
             hdr = {"x-client-transaction-id": gen.calc(method, path)}
+            await rate_limiter.acquire()  # process-wide QPS ceiling, every real request
             rep = await self.clt.request(method, url, params=params, headers=hdr)
             if rep.status_code != 404:
                 return rep
 
             tries += 1
             logger.debug(f"Retrying request with new x-client-transaction-id: {url}")
-            await asyncio.sleep(1)
-
+            
         raise XClIdRetryExhaustedError(
             "Still 404 after 3 x-client-transaction-id retries. "
             "See: https://github.com/doveppp/dovexscrape/issues/248"

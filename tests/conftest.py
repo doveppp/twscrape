@@ -9,10 +9,14 @@ from dovexscrape.api import API
 from dovexscrape.db import DB, execute
 from dovexscrape.logger import set_log_level
 from dovexscrape.queue_client import QueueClient, XClIdGenStore
+from dovexscrape.ratelimit import rate_limiter
 
 from .mock_http import MockClient
 
 set_log_level("CRITICAL")
+# the limiter is process-wide: disable the default 5 req/s so tests keep their timing,
+# limiting behaviour itself is covered by test_ratelimit.py
+rate_limiter.configure(None)
 
 
 class ClIdGenMock:
