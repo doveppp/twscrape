@@ -394,6 +394,7 @@ Do not set `api.proxy` or `DOVEXSCRAPE_PROXY` when you want per-account proxies 
 
 - `DOVEXSCRAPE_DB` - default MySQL url for accounts, eg. `mysql://user:pass@host:3306/db`
 - `DOVEXSCRAPE_RATE_LIMIT` - process-wide request ceiling, default `5` (req/s); accepts `5`, `5/s`, or `off`/`0` to disable
+- `DOVEXSCRAPE_MAX_EMPTY_PAGES` - empty pages tolerated before pagination stops, default `3`; `0` or `1` stop on the first empty page
 - `DOVEXSCRAPE_PROXY` - global proxy for all accounts
 - `DOVEXSCRAPE_WAIT_EMAIL_CODE` - email verification timeout in seconds, default `30`
 - `DOVEXSCRAPE_RAISE_WHEN_NO_ACCOUNT` - raise `NoAccountError` instead of waiting; accepts `false`, `0`, `true`, `1`
