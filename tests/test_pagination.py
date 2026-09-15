@@ -2,10 +2,15 @@
 Regression tests for pagination bugs:
   - #265 / #247: followers() / following() stops early when X returns a promo-only page
     (all entries have entryId starting with "who-to-follow-", leaving els=[] after filter)
+  - TweetDetail: replies() stops after the first page when the response only carries a
+    Bottom cursor (no ShowMoreThreads), and walks endless empty pages when a page holds
+    only collapsed conversation threads with empty `items`
 """
 
 import json
 import os
+
+import pytest
 
 from dovexscrape import API, gather
 from dovexscrape.queue_client import QueueClient
@@ -41,22 +46,58 @@ def make_promo_page(cursor: str | None = "next_cursor"):
     return {"data": {"entries": entries}}
 
 
-def make_content_page(entry_id: str, cursor: str):
-    return {
-        "data": {
-            "entries": [
-                {"entryId": entry_id, "content": {"itemContent": {}}},
-                {
-                    "entryId": f"cursor-{cursor}",
-                    "content": {
-                        "__typename": "TimelineTimelineCursor",
-                        "cursorType": "Bottom",
-                        "value": cursor,
-                    },
+def make_content_page(entry_id: str, cursor: str | None, cursor_type: str = "Bottom"):
+    entries = [{"entryId": entry_id, "content": {"itemContent": {}}}]
+    if cursor:
+        entries.append(
+            {
+                "entryId": f"cursor-{cursor}",
+                "content": {
+                    "__typename": "TimelineTimelineCursor",
+                    "cursorType": cursor_type,
+                    "value": cursor,
                 },
-            ]
+            }
+        )
+    return {"data": {"entries": entries}}
+
+
+def make_collapsed_thread_page(cursor: str | None):
+    """TweetDetail page holding only collapsed conversation threads.
+
+    X returns these for the LowQuality section: `items` is empty and the tweet ids are
+    only listed in `metadata.conversationMetadata.allTweetIds`, so parsing yields nothing.
+    """
+    entries = [
+        {
+            "entryId": f"conversationthread-{2099831927606344893 + i}",
+            "content": {
+                "__typename": "TimelineTimelineModule",
+                "displayType": "VerticalConversation",
+                "items": [],
+                "clientEventInfo": {
+                    "details": {"conversationDetails": {"conversationSection": "LowQuality"}}
+                },
+                "metadata": {
+                    "conversationMetadata": {"allTweetIds": [str(2095337070676038025 + i)]}
+                },
+            },
+            "sortIndex": str(2099831927606344893 + i),
         }
-    }
+        for i in range(3)
+    ]
+    if cursor:
+        entries.append(
+            {
+                "entryId": f"cursor-{cursor}",
+                "content": {
+                    "__typename": "TimelineTimelineCursor",
+                    "cursorType": "Bottom",
+                    "value": cursor,
+                },
+            }
+        )
+    return {"data": {"entries": entries}}
 
 
 async def test_followers_continues_past_promo_pages(monkeypatch, api_mock: API):
@@ -164,3 +205,123 @@ async def test_search_stops_on_repeated_page_with_new_cursor(monkeypatch, api_mo
 
     assert len(reps) == 1
     assert calls == 2
+
+
+async def test_tweet_replies_pages_with_bottom_cursor_only(monkeypatch, api_mock: API):
+    """TweetDetail ships only a Bottom cursor: replies must page on instead of stopping."""
+    cursors: list[str | None] = []
+
+    async def mock_get(self, url, params=None):
+        variables = json.loads((params or {}).get("variables", "{}"))
+        cursors.append(variables.get("cursor"))
+        n = len(cursors)
+        # two pages carrying a Bottom cursor, then a last page without any cursor
+        return FakeRep(make_content_page(f"tweet-{n}", f"bottom-{n}" if n <= 2 else None))
+
+    monkeypatch.setattr(QueueClient, "get", mock_get)
+    reps = [x async for x in api_mock.tweet_replies_raw(123)]
+
+    assert cursors == [None, "bottom-1", "bottom-2"], "Bottom cursor was not used to page"
+    assert len(reps) == 3, "each of the three pages should be yielded"
+
+
+async def test_pages_of_collapsed_threads_count_as_empty(monkeypatch, api_mock: API):
+    """A page of collapsed threads (empty items, nothing to parse) counts as an empty page."""
+    calls = 0
+
+    async def mock_get(self, url, params=None):
+        nonlocal calls
+        calls += 1
+        # a fresh cursor every page, so the repeated-cursor guard cannot be what stops us;
+        # the stuck cursor at the end only bounds a broken implementation
+        cur = f"cursor-{calls}" if calls <= 10 else "cursor-stuck"
+        return FakeRep(make_collapsed_thread_page(cur))
+
+    monkeypatch.setattr(QueueClient, "get", mock_get)
+    reps = [x async for x in api_mock._gql_items("hash/TweetDetail", {}, cursor_type="Bottom")]
+
+    assert reps == []
+    assert calls == 3, f"expected to stop after 3 empty pages, made {calls} requests"
+
+
+async def test_thread_module_with_items_is_not_dropped(monkeypatch, api_mock: API):
+    """Only module entries without items are dropped: a real conversation module must stay."""
+    page = {
+        "data": {
+            "entries": [
+                {
+                    "entryId": "conversationthread-2099831927606344893",
+                    "content": {
+                        "__typename": "TimelineTimelineModule",
+                        "displayType": "VerticalConversation",
+                        "items": [{"entryId": "tweet-1", "item": {"itemContent": {}}}],
+                    },
+                },
+                {
+                    "entryId": "cursor-bottom-1",
+                    "content": {
+                        "__typename": "TimelineTimelineCursor",
+                        "cursorType": "Bottom",
+                        "value": "bottom-1",
+                    },
+                },
+            ]
+        }
+    }
+    calls = 0
+
+    async def mock_get(self, url, params=None):
+        nonlocal calls
+        calls += 1
+        return FakeRep(page)
+
+    monkeypatch.setattr(QueueClient, "get", mock_get)
+    reps = [x async for x in api_mock._gql_items("hash/TweetDetail", {})]
+
+    assert len(reps) == 1, "module with items should still be treated as page content"
+    assert calls == 2, "page 2 repeats the same cursor and should stop pagination"
+
+
+# --- max_empty_pages ---
+
+
+async def count_requests_until_stop(api: API, monkeypatch) -> int:
+    calls = 0
+
+    async def mock_get(self, url, params=None):
+        nonlocal calls
+        calls += 1
+        return FakeRep(make_promo_page(cursor=f"cursor_{calls}"))
+
+    monkeypatch.setattr(QueueClient, "get", mock_get)
+    await gather(api.followers(123))
+    return calls
+
+
+@pytest.mark.parametrize("max_empty_pages", [0, 1])
+async def test_max_empty_pages_zero_or_one_stops_on_first_empty_page(
+    monkeypatch, api_mock: API, max_empty_pages: int
+):
+    api = API(api_mock.pool, max_empty_pages=max_empty_pages)
+    calls = await count_requests_until_stop(api, monkeypatch)
+
+    assert calls == 1, f"expected to stop on the first empty page, made {calls} request(s)"
+
+
+async def test_max_empty_pages_two_tolerates_one_empty_page(monkeypatch, api_mock: API):
+    api = API(api_mock.pool, max_empty_pages=2)
+    calls = await count_requests_until_stop(api, monkeypatch)
+
+    assert calls == 2, f"expected to stop on the second empty page, made {calls} request(s)"
+
+
+async def test_max_empty_pages_env_and_param(monkeypatch, api_mock: API):
+    monkeypatch.setenv("DOVEXSCRAPE_MAX_EMPTY_PAGES", "1")
+    assert API(api_mock.pool).max_empty_pages == 1
+    assert API(api_mock.pool, max_empty_pages=5).max_empty_pages == 5  # param wins
+
+    monkeypatch.setenv("DOVEXSCRAPE_MAX_EMPTY_PAGES", "not-a-number")
+    assert API(api_mock.pool).max_empty_pages == 3
+
+    monkeypatch.setenv("DOVEXSCRAPE_MAX_EMPTY_PAGES", "-2")
+    assert API(api_mock.pool).max_empty_pages == 0

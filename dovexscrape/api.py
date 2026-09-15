@@ -19,12 +19,17 @@ from .models import (
 )
 from .queue_client import QueueClient
 from .ratelimit import configure_rate_limit
-from .utils import encode_params, find_obj, get_by_path
+from .utils import encode_params, find_obj, get_by_path, get_env_int
 
 # GraphQL operation IDs used by this module.
 # If you add a new endpoint, add it here manually.
 # Update this block with: `uv run scripts/update-gql-ops.py`
 # This script rewrites the whole block automatically.
+
+# Consecutive pages carrying a cursor but nothing to parse are tolerated this many
+# times before pagination gives up; 0 and 1 both mean "stop on the first empty page".
+DEFAULT_MAX_EMPTY_PAGES = 3
+ENV_MAX_EMPTY_PAGES = "DOVEXSCRAPE_MAX_EMPTY_PAGES"
 
 # GQL_OPS_CODEGEN
 OP_AboutAccountQuery = "TzOG2twZEfhr9KmClvVVqA/AboutAccountQuery"
@@ -110,10 +115,16 @@ class API:
         wait_timeout: float | None = None,
         wait_interval: float = 5.0,
         rate_limit: float | str | None = None,
+        max_empty_pages: int | None = None,
     ):
         # process-wide: applies to every API/QueueClient in this process, eg. 5 or "5/s";
         # None keeps whatever the environment or the default installed, 0/"off" disables
         configure_rate_limit(rate_limit)
+
+        # per-instance: 0/1 stop on the first empty page, N tolerates N consecutive ones
+        if max_empty_pages is None:
+            max_empty_pages = get_env_int(ENV_MAX_EMPTY_PAGES, DEFAULT_MAX_EMPTY_PAGES)
+        self.max_empty_pages = max(0, max_empty_pages)
 
         if isinstance(pool, AccountsPool):
             self.pool = pool
@@ -171,8 +182,23 @@ class API:
         # standard timeline cursor: {cursorType: "Bottom", value: "..."}
         # fallback: community endpoints use slice_info.next_cursor (plain string)
         cur = find_obj(obj, lambda x: x.get("cursorType") == cursor_type)
+        if cur is None and cursor_type == "ShowMoreThreads":
+            # TweetDetail currently ships only the Bottom cursor, even when the
+            # caller asks for ShowMoreThreads: without this fallback the replies
+            # timeline stops after the first page (large threads are cut short).
+            cur = find_obj(obj, lambda x: x.get("cursorType") == "Bottom")
         value = cur.get("value") if cur else get_by_path(obj, "next_cursor")
         return value if isinstance(value, str) else None
+
+    @staticmethod
+    def _is_empty_module(entry) -> bool:
+        # module entries whose items are empty carry nothing to parse
+        if not isinstance(entry, dict):
+            return False
+        content = entry.get("content") or {}
+        if content.get("__typename") != "TimelineTimelineModule":
+            return False
+        return not (content.get("items") or [])
 
     def _gql_entries(self, obj: dict) -> list:
         # standard timelines put items in "entries"; community endpoints use "items_results"
@@ -186,6 +212,12 @@ class API:
                     ("cursor-", "messageprompt-", "module-", "who-to-follow-")
                 )
             ]
+            # collapsed conversation threads (eg. conversationthread-* in the
+            # LowQuality section) come with empty items and only allTweetIds as
+            # metadata. They parse to nothing but still count as page content,
+            # so _is_end keeps the empty-page counter at zero and pagination
+            # walks page after page of nothing. Drop them to keep that guard alive.
+            els = [x for x in els if not self._is_empty_module(x)]
         return els
 
     # gql helpers
@@ -225,7 +257,7 @@ class API:
                     # cursor exists → data may follow after empty/filtered pages (e.g. promo)
                     if cur is not None:
                         empty_pages += 1
-                        if empty_pages >= 3:
+                        if empty_pages >= self.max_empty_pages:
                             logger.debug(f"{queue} – {empty_pages} empty pages in a row, stopping")
                             return
                         continue

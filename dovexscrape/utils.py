@@ -5,6 +5,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Callable, TypeVar, overload
 
+from .logger import logger
+
 T = TypeVar("T")
 
 
@@ -422,3 +424,14 @@ def get_env_bool(key: str, default_val: bool = False) -> bool:
     if val is None:
         return default_val
     return val.lower() in ("1", "true", "yes")
+
+
+def get_env_int(key: str, default_val: int) -> int:
+    val = os.getenv(key)
+    if val is None:
+        return default_val
+    try:
+        return int(val)
+    except ValueError:
+        logger.warning(f"Invalid {key}={val!r}, using {default_val}")
+        return default_val

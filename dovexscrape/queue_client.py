@@ -136,7 +136,7 @@ class Ctx:
 
             tries += 1
             logger.debug(f"Retrying request with new x-client-transaction-id: {url}")
-            
+
         raise XClIdRetryExhaustedError(
             "Still 404 after 3 x-client-transaction-id retries. "
             "See: https://github.com/doveppp/dovexscrape/issues/248"
