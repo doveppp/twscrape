@@ -467,6 +467,30 @@ def test_curl_client_strips_user_agent_from_session():
     assert "user-agent" not in {k.lower() for k in session_headers}
 
 
+def test_httpx_clients_share_transport_per_proxy():
+    direct_a = HttpxClient()
+    direct_b = HttpxClient()
+    proxy_a = HttpxClient(proxy="http://127.0.0.1:1")
+    proxy_b = HttpxClient(proxy="http://127.0.0.1:1")
+    other = HttpxClient(proxy="http://127.0.0.1:2")
+
+    assert direct_a._client._transport is direct_b._client._transport
+    assert proxy_a._client._transport is proxy_b._client._transport
+    assert direct_a._client._transport is not proxy_a._client._transport
+    assert proxy_a._client._transport is not other._client._transport
+
+
+async def test_closing_httpx_client_keeps_shared_pool():
+    client = HttpxClient()
+    other = HttpxClient()
+    pool = client._client._transport._pool
+    pool._connections.append("sentinel")
+    await client.aclose()
+    assert other._client._transport._pool is pool
+    assert pool._connections == ["sentinel"]
+    pool._connections.clear()
+
+
 def test_httpx_client_resolves_ua_hint_to_real_string():
     from twscrape.http import HttpxClient
 

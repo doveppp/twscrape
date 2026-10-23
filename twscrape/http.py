@@ -140,6 +140,29 @@ class HttpClient(ABC):
     def headers(self) -> Any: ...
 
 
+# ponytail: one pool per proxy for the process. Client.aclose must not drop it.
+_shared_transports: dict[str | None, Any] = {}
+
+
+def _shared_transport(proxy: str | None) -> Any:
+    transport = _shared_transports.get(proxy)
+    if transport is not None:
+        return transport
+
+    from httpx import AsyncHTTPTransport
+
+    class _Pool(AsyncHTTPTransport):
+        async def aclose(self) -> None:
+            return
+
+        async def __aexit__(self, *_: object) -> None:
+            return
+
+    transport = _Pool(retries=3, proxy=proxy)
+    _shared_transports[proxy] = transport
+    return transport
+
+
 class HttpxClient(HttpClient):
     backend = "httpx"
 
@@ -152,17 +175,16 @@ class HttpxClient(HttpClient):
         seed: int | None = None,
     ):
         import httpx
-        from httpx import AsyncHTTPTransport
 
         self._httpx = httpx
-        transport = AsyncHTTPTransport(retries=3)
         resolved_headers = dict(headers or {})
         ua_string, _ = _resolve_browser(resolved_headers.get("user-agent"), seed=seed)
         resolved_headers["user-agent"] = ua_string
+        # proxy lives on the transport. AsyncClient(proxy=) would mount a fresh pool
+        # and ignore the shared one.
         self._client = httpx.AsyncClient(
-            proxy=proxy,
             follow_redirects=True,
-            transport=transport,
+            transport=_shared_transport(proxy),
             headers=resolved_headers,
             cookies=cookies or {},
         )
