@@ -133,11 +133,11 @@ def check_tweet(doc: Tweet | None):
 
     assert "url" in obj
     assert "_type" in obj
-    assert obj["_type"] == "snscrape.modules.twitter.Tweet"
+    assert obj["_type"] == "dove.modules.twitter.Tweet"
 
     assert "url" in obj["user"]
     assert "_type" in obj["user"]
-    assert obj["user"]["_type"] == "snscrape.modules.twitter.User"
+    assert obj["user"]["_type"] == "dove.modules.twitter.User"
 
     txt = doc.json()
     assert isinstance(txt, str)

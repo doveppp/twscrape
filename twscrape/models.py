@@ -183,7 +183,7 @@ class UserRef(JSONTrait):
     id_str: str
     username: str
     displayname: str
-    _type: str = "snscrape.modules.twitter.UserRef"
+    _type: str = "dove.modules.twitter.UserRef"
 
     @staticmethod
     def parse(obj: dict):
@@ -219,7 +219,7 @@ class User(JSONTrait):
     blueType: str | None = None
     descriptionLinks: list[TextLink] = field(default_factory=list)
     pinnedIds: list[int] = field(default_factory=list)
-    _type: str = "snscrape.modules.twitter.User"
+    _type: str = "dove.modules.twitter.User"
 
     # todo:
     # link: typing.Optional[TextLink] = None
@@ -453,7 +453,7 @@ class Tweet(JSONTrait):
     editControl: dict | None = None
     voiceInfo: dict | None = None
     article: Article | None = None
-    _type: str = "snscrape.modules.twitter.Tweet"
+    _type: str = "dove.modules.twitter.Tweet"
 
     # todo:
     # renderedContent: str
