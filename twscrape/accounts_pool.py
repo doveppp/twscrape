@@ -1,12 +1,11 @@
 import asyncio
 import json
-import sqlite3
 import uuid
 from datetime import datetime, timezone
 from typing import TypedDict
 
-from .account import Account, has_required_cookies
-from .db import execute, fetchall, fetchone
+from .account import Account, _parse_dt, has_required_cookies
+from .db import DB, default_db
 from .http import HttpStatusError
 from .logger import logger
 from .login import LoginConfig, login
@@ -27,24 +26,29 @@ class AccountInfo(TypedDict):
     error_msg: str | None
 
 
+# kind -> accounts column holding the consecutive failure count
+_FAIL_COLUMNS = {"xclid": "xclid_fail_count", "unknown": "unknown_fail_count"}
+
+
 def guess_delim(line: str):
     lp, rp = tuple([x.strip() for x in line.split("username")])
     return rp[0] if not lp else lp[-1]
 
 
 class AccountsPool:
-    # _order_by: str = "RANDOM()"
+    # _order_by: str = "RAND()"
     _order_by: str = "username"
 
     def __init__(
         self,
-        db_file="accounts.db",
+        db_file: str | None = None,
         login_config: LoginConfig | None = None,
         raise_when_no_account=False,
         wait_timeout: float | None = None,
         wait_interval: float = 5.0,
     ):
-        self._db_file = db_file
+        self._db_file = str(db_file or default_db())
+        self._db = DB(self._db_file)
         self._login_config = login_config or LoginConfig()
         self._raise_when_no_account = raise_when_no_account
         # When every active account is momentarily locked (in-use or rate-limited),
@@ -56,10 +60,24 @@ class AccountsPool:
         self._wait_timeout = wait_timeout
         self._wait_interval = wait_interval
 
+    async def __aenter__(self):
+        await self._db.pool()
+        return self
+
+    async def __aexit__(self, *args):
+        await self.aclose()
+
+    async def aclose(self):
+        await self._db.aclose()
+
+    @staticmethod
+    def _json_path(queue: str):
+        return "$." + json.dumps(queue, ensure_ascii=False)
+
     @staticmethod
     def _usernames_where(usernames: list[str]) -> tuple[str, dict[str, str]]:
         params = {f"username_{i}": x for i, x in enumerate(dict.fromkeys(usernames))}
-        return ",".join(f":{x}" for x in params), params
+        return ",".join(f"%({x})s" for x in params), params
 
     async def load_from_file(self, filepath: str, line_format: str):
         line_delim = guess_delim(line_format)
@@ -97,29 +115,25 @@ class AccountsPool:
         cookies: str | None = None,
         mfa_code: str | None = None,
     ):
-        qs = "SELECT * FROM accounts WHERE username = :username"
-        rs = await fetchone(self._db_file, qs, {"username": username})
-        if rs:
+        if await self.get_account(username):
             logger.warning(f"Account {username} already exists")
             return
 
+        parsed = parse_cookies(cookies) if cookies else {}
         account = Account(
             username=username,
             password=password,
             email=email,
             email_password=email_password,
             user_agent=user_agent or "@chrome",
-            active=False,
+            active=has_required_cookies(parsed),
             locks={},
             stats={},
             headers={},
-            cookies=parse_cookies(cookies) if cookies else {},
+            cookies=parsed,
             proxy=proxy,
             mfa_code=mfa_code,
         )
-
-        if has_required_cookies(account.cookies):
-            account.active = True
 
         await self.save(account)
         logger.info(f"Account {username} added successfully (active={account.active})")
@@ -130,59 +144,67 @@ class AccountsPool:
             raise ValueError("Cookies must include auth_token and ct0")
 
         qs = """
-        INSERT INTO accounts (username, password, email, email_password, user_agent, active, cookies)
-        VALUES (:username, '_', '_', '_', '@chrome', true, :cookies)
-        ON CONFLICT(username) DO UPDATE SET
-            cookies = excluded.cookies,
+        INSERT INTO accounts (
+            username, password, email, email_password, user_agent, active,
+            locks, stats, headers, cookies
+        )
+        VALUES (
+            %(username)s, '_', '_', '_', '@chrome', 1,
+            '{}', '{}', '{}', %(cookies)s
+        ) AS new
+        ON DUPLICATE KEY UPDATE
+            cookies = new.cookies,
             headers = '{}',
-            active = true,
-            error_msg = NULL
+            active = 1,
+            error_msg = NULL,
+            locks = '{}',
+            global_locked_until = NULL,
+            _tx = NULL,
+            xclid_fail_count = 0,
+            unknown_fail_count = 0
         """
-        await execute(self._db_file, qs, {"username": username, "cookies": json.dumps(parsed)})
+        await self._db.execute(qs, {"username": username, "cookies": json.dumps(parsed)})
         logger.info(f"Cookies for account {username} updated successfully")
 
     async def delete_accounts(self, usernames: str | list[str]):
         usernames = usernames if isinstance(usernames, list) else [usernames]
+        usernames = list(dict.fromkeys(usernames))
         if not usernames:
             logger.warning("No usernames provided")
             return
 
         placeholders, params = self._usernames_where(usernames)
         qs = f"DELETE FROM accounts WHERE username IN ({placeholders})"
-        await execute(self._db_file, qs, params)
+        await self._db.execute(qs, params)
 
     async def delete_inactive(self):
-        qs = "DELETE FROM accounts WHERE active = false"
-        await execute(self._db_file, qs)
+        await self._db.execute("DELETE FROM accounts WHERE active = 0")
 
     async def get(self, username: str):
-        qs = "SELECT * FROM accounts WHERE username = :username"
-        rs = await fetchone(self._db_file, qs, {"username": username})
-        if not rs:
+        account = await self.get_account(username)
+        if account is None:
             raise ValueError(f"Account {username} not found")
-        return Account.from_rs(rs)
-
-    async def get_all(self):
-        qs = "SELECT * FROM accounts"
-        rs = await fetchall(self._db_file, qs)
-        return [Account.from_rs(x) for x in rs]
+        return account
 
     async def get_account(self, username: str):
-        qs = "SELECT * FROM accounts WHERE username = :username"
-        rs = await fetchone(self._db_file, qs, {"username": username})
-        if not rs:
-            return None
-        return Account.from_rs(rs)
+        qs = "SELECT * FROM accounts WHERE username = %(username)s"
+        rs = await self._db.fetchone(qs, {"username": username})
+        return Account.from_rs(rs) if rs else None
+
+    async def get_all(self):
+        rs = await self._db.fetchall("SELECT * FROM accounts")
+        return [Account.from_rs(x) for x in rs]
 
     async def save(self, account: Account):
         data = account.to_rs()
         cols = list(data.keys())
 
         qs = f"""
-        INSERT INTO accounts ({",".join(cols)}) VALUES ({",".join([f":{x}" for x in cols])})
-        ON CONFLICT(username) DO UPDATE SET {",".join([f"{x}=excluded.{x}" for x in cols])}
+        INSERT INTO accounts ({",".join(cols)})
+        VALUES ({",".join([f"%({x})s" for x in cols])}) AS new
+        ON DUPLICATE KEY UPDATE {",".join([f"{x} = new.{x}" for x in cols])}
         """
-        await execute(self._db_file, qs, data)
+        await self._db.execute(qs, data)
 
     async def login(self, account: Account):
         try:
@@ -208,15 +230,14 @@ class AccountsPool:
 
         params = None
         if usernames is None:
-            qs = "SELECT * FROM accounts WHERE active = false AND error_msg IS NULL"
+            qs = "SELECT * FROM accounts WHERE active = 0 AND error_msg IS NULL"
         else:
             placeholders, params = self._usernames_where(usernames)
             qs = f"SELECT * FROM accounts WHERE username IN ({placeholders})"
 
-        rs = await fetchall(self._db_file, qs, params)
-        accounts = [Account.from_rs(rs) for rs in rs]
+        rs = await self._db.fetchall(qs, params)
+        accounts = [Account.from_rs(x) for x in rs]
         accounts = [x for x in accounts if x.login_method == "password"]
-        # await asyncio.gather(*[login(x) for x in self.accounts])
 
         counter = {"total": len(accounts), "success": 0, "failed": 0}
         for i, x in enumerate(accounts, start=1):
@@ -234,94 +255,189 @@ class AccountsPool:
         placeholders, params = self._usernames_where(usernames)
         qs = f"""
         UPDATE accounts SET
-            active = false,
+            active = 0,
             locks = json_object(),
+            global_locked_until = NULL,
+            _tx = NULL,
             last_used = NULL,
             error_msg = NULL,
             headers = json_object(),
             cookies = json_object(),
-            user_agent = "@chrome"
+            user_agent = '@chrome',
+            xclid_fail_count = 0,
+            unknown_fail_count = 0
         WHERE username IN ({placeholders}) AND password != '_'
         """
 
-        await execute(self._db_file, qs, params)
+        await self._db.execute(qs, params)
         await self.login_all(usernames)
 
     async def relogin_failed(self):
-        qs = "SELECT username FROM accounts WHERE active = false AND error_msg IS NOT NULL"
-        rs = await fetchall(self._db_file, qs)
+        qs = "SELECT username FROM accounts WHERE active = 0 AND error_msg IS NOT NULL"
+        rs = await self._db.fetchall(qs)
         await self.relogin([x["username"] for x in rs])
 
     async def reset_locks(self):
-        qs = "UPDATE accounts SET locks = json_object()"
-        await execute(self._db_file, qs)
+        qs = """
+        UPDATE accounts SET
+            locks = json_object(),
+            global_locked_until = NULL,
+            _tx = NULL,
+            xclid_fail_count = 0,
+            unknown_fail_count = 0
+        """
+        await self._db.execute(qs)
 
     async def set_active(self, username: str, active: bool):
-        qs = "UPDATE accounts SET active = :active WHERE username = :username"
-        await execute(self._db_file, qs, {"username": username, "active": active})
+        qs = "UPDATE accounts SET active = %(active)s WHERE username = %(username)s"
+        await self._db.execute(qs, {"username": username, "active": 1 if active else 0})
 
-    async def lock_until(self, username: str, queue: str, unlock_at: int, req_count=0):
-        qs = f"""
-        UPDATE accounts SET
-            locks = json_set(locks, '$.{queue}', datetime({unlock_at}, 'unixepoch')),
-            stats = json_set(stats, '$.{queue}', COALESCE(json_extract(stats, '$.{queue}'), 0) + {req_count}),
-            last_used = datetime({utc.ts()}, 'unixepoch')
-        WHERE username = :username
+    async def incr_fail_count(self, username: str, kind: str) -> int:
+        """Bump a consecutive-failure counter and return the new value.
+
+        Deliberately not guarded by _tx: a failure must never be dropped.
         """
-        await execute(self._db_file, qs, {"username": username})
+        column = _FAIL_COLUMNS[kind]
+        pool = await self._db.pool()
+        async with pool.acquire() as conn, conn.cursor() as cur:
+            # LAST_INSERT_ID(expr) returns this connection's exact increment, so two
+            # workers hitting the same account cannot read each other's value.
+            await cur.execute(
+                f"UPDATE accounts SET {column} = LAST_INSERT_ID({column} + 1) "
+                "WHERE username = %(username)s",
+                {"username": username},
+            )
+            if not cur.rowcount:
+                return 0
+            await cur.execute("SELECT LAST_INSERT_ID() AS count")
+            return int((await cur.fetchone())["count"])
 
-    async def unlock(self, username: str, queue: str, req_count=0):
-        qs = f"""
-        UPDATE accounts SET
-            locks = json_remove(locks, '$.{queue}'),
-            stats = json_set(stats, '$.{queue}', COALESCE(json_extract(stats, '$.{queue}'), 0) + {req_count}),
-            last_used = datetime({utc.ts()}, 'unixepoch')
-        WHERE username = :username
+    async def reset_fail_count(self, username: str, kind: str):
+        column = _FAIL_COLUMNS[kind]
+        qs = f"UPDATE accounts SET {column} = 0 WHERE username = %(username)s AND {column} > 0"
+        await self._db.execute(qs, {"username": username})
+
+    @staticmethod
+    def _guard(sql: str, params: dict, tx: str | None):
+        if tx is not None:
+            sql += " AND _tx = %(tx)s"
+            params["tx"] = tx
+        return sql, params
+
+    async def lock_global(self, username: str, unlock_at: int, tx: str | None = None):
+        """Freeze an account for every queue until unlock_at (unix ts)."""
+        qs = """
+        UPDATE accounts SET global_locked_until = FROM_UNIXTIME(%(unlock_at)s)
+        WHERE username = %(username)s
         """
-        await execute(self._db_file, qs, {"username": username})
+        params = {"username": username, "unlock_at": unlock_at}
+        await self._db.execute(*self._guard(qs, params, tx))
 
-    async def _get_and_lock(self, queue: str, condition: str) -> Account | None:
-        # if space in condition, it's a subquery, otherwise it's username
-        condition = f"({condition})" if " " in condition else f"'{condition}'"
+    async def lock_until(
+        self,
+        username: str,
+        queue: str,
+        unlock_at: int,
+        req_count=0,
+        tx: str | None = None,
+        *,
+        global_lock=False,
+    ):
+        path = self._json_path(queue)
+        qs = """
+        UPDATE accounts SET
+            locks = JSON_SET(locks, %(path)s, FROM_UNIXTIME(%(unlock_at)s)),
+            stats = JSON_SET(stats, %(path)s, COALESCE(JSON_EXTRACT(stats, %(path)s), 0)
+                + %(req_count)s),
+            last_used = NOW(),
+            _tx = NULL,
+            global_locked_until = IF(%(global)s, FROM_UNIXTIME(%(unlock_at)s),
+                global_locked_until)
+        WHERE username = %(username)s
+        """
+        params = {
+            "username": username,
+            "path": path,
+            "unlock_at": unlock_at,
+            "req_count": req_count,
+            "global": global_lock,
+        }
+        await self._db.execute(*self._guard(qs, params, tx))
 
-        if int(sqlite3.sqlite_version_info[1]) >= 35:
-            qs = f"""
-            UPDATE accounts SET
-                locks = json_set(locks, '$.{queue}', datetime('now', '+15 minutes')),
-                last_used = datetime({utc.ts()}, 'unixepoch')
-            WHERE username = {condition}
-            RETURNING *
-            """
-            rs = await fetchone(self._db_file, qs)
-        else:
-            tx = uuid.uuid4().hex
-            qs = f"""
-            UPDATE accounts SET
-                locks = json_set(locks, '$.{queue}', datetime('now', '+15 minutes')),
-                last_used = datetime({utc.ts()}, 'unixepoch'),
-                _tx = '{tx}'
-            WHERE username = {condition}
-            """
-            await execute(self._db_file, qs)
-
-            qs = f"SELECT * FROM accounts WHERE _tx = '{tx}'"
-            rs = await fetchone(self._db_file, qs)
-
-        return Account.from_rs(rs) if rs else None
+    async def unlock(self, username: str, queue: str, req_count=0, tx: str | None = None):
+        path = self._json_path(queue)
+        qs = """
+        UPDATE accounts SET
+            locks = JSON_REMOVE(locks, %(path)s),
+            stats = JSON_SET(stats, %(path)s, COALESCE(JSON_EXTRACT(stats, %(path)s), 0)
+                + %(req_count)s),
+            last_used = NOW(),
+            _tx = NULL
+        WHERE username = %(username)s
+        """
+        params = {"username": username, "path": path, "req_count": req_count}
+        await self._db.execute(*self._guard(qs, params, tx))
 
     async def get_for_queue(self, queue: str) -> Account | None:
-        q = f"""
-        SELECT username FROM accounts
-        WHERE active = true AND (
-            locks IS NULL
-            OR json_extract(locks, '$.{queue}') IS NULL
-            OR json_extract(locks, '$.{queue}') < datetime('now')
-        )
-        ORDER BY {self._order_by}
-        LIMIT 1
-        """
+        path = self._json_path(queue)
+        pool = await self._db.pool()
 
-        return await self._get_and_lock(queue, q)
+        async with pool.acquire() as conn, conn.cursor() as cur:
+            # Read candidates without locks, then claim one with a single-row
+            # compare-and-set UPDATE. Every statement commits on its own, so a
+            # worker never holds a table scan or multiple row locks: this removes
+            # the lock-order cycle that made concurrent acquisition deadlock-prone.
+            await cur.execute(
+                f"""
+                SELECT username FROM accounts
+                WHERE active = 1
+                  AND (JSON_EXTRACT(locks, %(path)s) IS NULL
+                       OR CAST(JSON_UNQUOTE(JSON_EXTRACT(locks, %(path)s))
+                           AS DATETIME) < NOW())
+                  AND (global_locked_until IS NULL OR global_locked_until < NOW())
+                  AND (_tx IS NULL OR last_used < DATE_SUB(NOW(), INTERVAL 15 MINUTE))
+                ORDER BY {self._order_by}
+                LIMIT 50
+                """,
+                {"path": path},
+            )
+            candidates = await cur.fetchall()
+
+            for candidate in candidates:
+                tx = uuid.uuid4().hex
+                await cur.execute(
+                    """
+                    UPDATE accounts SET
+                        locks = JSON_SET(locks, %(path)s,
+                            DATE_ADD(NOW(), INTERVAL 15 MINUTE)),
+                        last_used = NOW(),
+                        _tx = %(tx)s
+                    WHERE username = %(username)s
+                      AND active = 1
+                      AND (JSON_EXTRACT(locks, %(path)s) IS NULL
+                           OR CAST(JSON_UNQUOTE(JSON_EXTRACT(locks, %(path)s))
+                               AS DATETIME) < NOW())
+                      AND (global_locked_until IS NULL OR global_locked_until < NOW())
+                      AND (_tx IS NULL OR last_used < DATE_SUB(NOW(), INTERVAL 15 MINUTE))
+                    """,
+                    {"path": path, "tx": tx, "username": candidate["username"]},
+                )
+                if not cur.rowcount:
+                    continue
+
+                await cur.execute(
+                    "SELECT * FROM accounts WHERE username = %(username)s AND _tx = %(tx)s",
+                    {"username": candidate["username"], "tx": tx},
+                )
+                rs = await cur.fetchone()
+                return Account.from_rs(rs) if rs else None
+
+        return None
+
+    async def active_count(self) -> int:
+        """Number of accounts with active=1, including currently locked ones."""
+        rs = await self._db.fetchone("SELECT COUNT(*) AS count FROM accounts WHERE active = 1")
+        return int(rs["count"]) if rs else 0
 
     async def get_for_queue_or_wait(self, queue: str) -> Account | None:
         start = utc.now()
@@ -333,8 +449,10 @@ class AccountsPool:
                     logger.info(f"Continuing with account {account.username} on queue {queue}")
                 return account
 
-            raise_no_account = self._raise_when_no_account or get_env_bool(
-                "TWS_RAISE_WHEN_NO_ACCOUNT"
+            raise_no_account = (
+                self._raise_when_no_account
+                or get_env_bool("TWS_RAISE_WHEN_NO_ACCOUNT")
+                or get_env_bool("DOVEXSCRAPE_RAISE_WHEN_NO_ACCOUNT")
             )
 
             # next_available_at returns None only when no active account exists at all,
@@ -359,36 +477,50 @@ class AccountsPool:
                 # unbounded wait below.
 
             if not msg_shown:
-                logger.info(f'No account available for queue "{queue}". Next available at {nat}')
+                active = await self.active_count()
+                logger.info(
+                    f'No account available for queue "{queue}". '
+                    f"Active accounts: {active}. Next available at {nat}"
+                )
                 msg_shown = True
 
             await asyncio.sleep(self._wait_interval)
 
     async def next_available_at(self, queue: str):
-        qs = f"""
-        SELECT json_extract(locks, '$."{queue}"') as lock_until
-        FROM accounts
-        WHERE active = true AND json_extract(locks, '$."{queue}"') IS NOT NULL
-        ORDER BY lock_until ASC
-        LIMIT 1
-        """
-        rs = await fetchone(self._db_file, qs)
-        if rs:
-            now, trg = utc.now(), utc.from_iso(rs[0])
-            if trg < now:
-                return "now"
-
-            at_local = datetime.now() + (trg - now)
-            return at_local.strftime("%H:%M:%S")
-
-        return None
-
-    async def mark_inactive(self, username: str, error_msg: str | None):
+        path = self._json_path(queue)
         qs = """
-        UPDATE accounts SET active = false, error_msg = :error_msg
-        WHERE username = :username
+        SELECT MIN(GREATEST(
+            COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(locks, %(path)s)) AS DATETIME), NOW()),
+            COALESCE(global_locked_until, NOW()),
+            IF(_tx IS NULL, NOW(), DATE_ADD(COALESCE(last_used, NOW()), INTERVAL 15 MINUTE))
+        )) AS lock_until
+        FROM accounts
+        WHERE active = 1
         """
-        await execute(self._db_file, qs, {"username": username, "error_msg": error_msg})
+        rs = await self._db.fetchone(qs, {"path": path})
+        trg = _parse_dt(rs["lock_until"]) if rs else None
+        if trg is None:
+            return None
+
+        now = utc.now()
+        if trg < now:
+            return "now"
+
+        at_local = datetime.now() + (trg - now)
+        return at_local.strftime("%H:%M:%S")
+
+    async def mark_inactive(self, username: str, error_msg: str | None, tx: str | None = None):
+        qs = """
+        UPDATE accounts SET
+            active = 0,
+            error_msg = %(error_msg)s,
+            _tx = NULL,
+            xclid_fail_count = 0,
+            unknown_fail_count = 0
+        WHERE username = %(username)s
+        """
+        params = {"username": username, "error_msg": error_msg}
+        await self._db.execute(*self._guard(qs, params, tx))
 
     async def reactivate(self, usernames: str | list[str]):
         usernames = usernames if isinstance(usernames, list) else [usernames]
@@ -398,7 +530,7 @@ class AccountsPool:
 
         placeholders, params = self._usernames_where(usernames)
         qs = f"SELECT * FROM accounts WHERE username IN ({placeholders})"
-        accounts = [Account.from_rs(x) for x in await fetchall(self._db_file, qs, params)]
+        accounts = [Account.from_rs(x) for x in await self._db.fetchall(qs, params)]
         for x in sorted(set(usernames) - {a.username for a in accounts}):
             logger.warning(f"Account {x} not found")
 
@@ -414,32 +546,39 @@ class AccountsPool:
             return
 
         placeholders, params = self._usernames_where(usernames)
-        qs = f"UPDATE accounts SET active = true, error_msg = NULL WHERE username IN ({placeholders})"
-        await execute(self._db_file, qs, params)
+        qs = f"""
+        UPDATE accounts SET
+            active = 1,
+            error_msg = NULL,
+            locks = '{{}}',
+            global_locked_until = NULL,
+            _tx = NULL,
+            xclid_fail_count = 0,
+            unknown_fail_count = 0
+        WHERE username IN ({placeholders})
+        """
+        await self._db.execute(qs, params)
         logger.info(f"Reactivated accounts: {', '.join(usernames)}")
 
     async def stats(self):
-        def locks_count(queue: str):
-            return f"""
-            SELECT COUNT(*) FROM accounts
-            WHERE json_extract(locks, '$.{queue}') IS NOT NULL
-                AND json_extract(locks, '$.{queue}') > datetime('now')
-            """
+        accounts = await self.get_all()
+        now = utc.now()
+        queues = {q for x in accounts for q in x.locks}
 
-        qs = "SELECT DISTINCT(f.key) as k from accounts, json_each(locks) f"
-        rs = await fetchall(self._db_file, qs)
-        gql_ops = [x["k"] for x in rs]
-
-        config = [
-            ("total", "SELECT COUNT(*) FROM accounts"),
-            ("active", "SELECT COUNT(*) FROM accounts WHERE active = true"),
-            ("inactive", "SELECT COUNT(*) FROM accounts WHERE active = false"),
-            *[(f"locked_{x}", locks_count(x)) for x in gql_ops],
-        ]
-
-        qs = f"SELECT {','.join([f'({q}) as {k}' for k, q in config])}"
-        rs = await fetchone(self._db_file, qs)
-        return dict(rs) if rs else {}
+        res = {
+            "total": len(accounts),
+            "active": sum(x.active for x in accounts),
+            "inactive": sum(not x.active for x in accounts),
+            "globally_locked": sum(
+                bool(x.active and x.global_locked_until and x.global_locked_until > now)
+                for x in accounts
+            ),
+        }
+        for queue in queues:
+            res[f"locked_{queue}"] = sum(
+                bool(x.locks.get(queue) and x.locks[queue] > now) for x in accounts
+            )
+        return res
 
     async def accounts_info(self):
         accounts = await self.get_all()
@@ -465,5 +604,4 @@ class AccountsPool:
             reverse=True,
         )
         items = sorted(items, key=lambda x: x["active"], reverse=True)
-        # items = sorted(items, key=lambda x: x["total_req"], reverse=True)
         return items

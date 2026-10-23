@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from twscrape.accounts_pool import AccountsPool, NoAccountError
@@ -373,11 +375,13 @@ async def test_get_for_queue_or_wait_does_not_wait_without_active_accounts(
     assert await pool.get_for_queue_or_wait("TestQueue") is None
 
 
-def test_api_passes_wait_config_to_new_pool(tmp_path):
-    api = API(str(tmp_path / "test.db"), wait_timeout=1, wait_interval=0.1)
-
-    assert api.pool._wait_timeout == 1
-    assert api.pool._wait_interval == 0.1
+async def test_api_passes_wait_config_to_new_pool(db_dsn):
+    api = API(db_dsn, wait_timeout=1, wait_interval=0.1)
+    try:
+        assert api.pool._wait_timeout == 1
+        assert api.pool._wait_interval == 0.1
+    finally:
+        await api.pool.aclose()
 
 
 async def test_accounts_info_active_first(pool_mock: AccountsPool):
@@ -400,3 +404,201 @@ async def test_load_from_file(pool_mock: AccountsPool, tmp_path):
     usernames = {x.username for x in await pool_mock.get_all()}
     assert "user1" in usernames
     assert "user2" in usernames
+
+
+# --- MySQL integration: leases and persisted health ---
+
+
+async def test_concurrent_acquisition_has_one_owner(pool_mock: AccountsPool):
+    await pool_mock.add_account_cookies("user1", "auth_token=t; ct0=c")
+    accounts = await asyncio.gather(*(pool_mock.get_for_queue("SearchTimeline") for _ in range(12)))
+    owners = [x for x in accounts if x is not None]
+    assert len(owners) == 1
+    assert owners[0]._tx
+
+    # another queue must not steal the first queue's fencing token
+    assert await pool_mock.get_for_queue("TweetDetail") is None
+    assert await pool_mock.next_available_at("TweetDetail") is not None
+
+
+async def test_stale_owner_cannot_change_account_state(pool_mock: AccountsPool):
+    await pool_mock.add_account_cookies("user1", "auth_token=t; ct0=c")
+    first = await pool_mock.get_for_queue("SearchTimeline")
+    await pool_mock.reset_locks()
+    second = await pool_mock.get_for_queue("SearchTimeline")
+    assert first is not None and second is not None
+    assert first._tx != second._tx
+
+    await pool_mock.unlock("user1", "SearchTimeline", 100, tx=first._tx)
+    await pool_mock.lock_until("user1", "SearchTimeline", utc.ts() + 9999, tx=first._tx)
+    await pool_mock.mark_inactive("user1", "stale", tx=first._tx)
+
+    actual = await pool_mock.get("user1")
+    assert actual._tx == second._tx
+    assert actual.active is True
+    assert actual.stats == {}
+
+    await pool_mock.unlock("user1", "SearchTimeline", 2, tx=second._tx)
+    actual = await pool_mock.get("user1")
+    assert actual._tx is None
+    assert actual.stats["SearchTimeline"] == 2
+
+
+async def test_failure_counts_are_atomic_and_persisted(pool_mock: AccountsPool):
+    await pool_mock.add_account_cookies("user1", "auth_token=t; ct0=c")
+    counts = await asyncio.gather(*(pool_mock.incr_fail_count("user1", "xclid") for _ in range(10)))
+    assert sorted(counts) == list(range(1, 11))
+
+    # a fresh pool (new connections) sees the persisted value
+    other = AccountsPool(pool_mock._db_file)
+    try:
+        assert (await other.get("user1")).xclid_fail_count == 10
+    finally:
+        await other.aclose()
+
+    await pool_mock.reset_fail_count("user1", "xclid")
+    assert (await pool_mock.get("user1")).xclid_fail_count == 0
+    with pytest.raises(KeyError):
+        await pool_mock.incr_fail_count("user1", "sql-injection")
+
+
+async def test_global_lock_blocks_every_queue(pool_mock: AccountsPool):
+    await pool_mock.add_account_cookies("user1", "auth_token=t; ct0=c")
+    await pool_mock.lock_global("user1", utc.ts() + 3600)
+
+    assert await pool_mock.get_for_queue("SearchTimeline") is None
+    assert await pool_mock.get_for_queue("TweetDetail") is None
+    assert await pool_mock.next_available_at("TweetDetail") not in (None, "now")
+
+    await pool_mock.lock_global("user1", utc.ts() - 1)
+    assert await pool_mock.get_for_queue("SearchTimeline") is not None
+
+
+async def test_queue_name_is_parameterized(pool_mock: AccountsPool):
+    queue = 'queue.\\"quoted'
+    await pool_mock.add_account_cookies("user1", "auth_token=t; ct0=c")
+    account = await pool_mock.get_for_queue(queue)
+    assert account is not None
+    assert queue in account.locks
+
+    await pool_mock.unlock("user1", queue, 1, tx=account._tx)
+    assert (await pool_mock.get("user1")).stats == {queue: 1}
+
+
+async def test_mark_inactive_resets_fail_counts(pool_mock: AccountsPool):
+    await pool_mock.add_account_cookies("user1", "auth_token=t; ct0=c")
+    await pool_mock.incr_fail_count("user1", "xclid")
+    await pool_mock.incr_fail_count("user1", "unknown")
+
+    await pool_mock.mark_inactive("user1", "banned by system")
+
+    account = await pool_mock.get("user1")
+    assert account.active is False
+    assert account.xclid_fail_count == 0
+    assert account.unknown_fail_count == 0
+
+
+async def test_reset_locks_clears_global_lock_and_health(pool_mock: AccountsPool):
+    await pool_mock.add_account_cookies("user1", "auth_token=t; ct0=c")
+    await pool_mock.get_for_queue("SearchTimeline")
+    await pool_mock.lock_global("user1", utc.ts() + 3600)
+    await pool_mock.incr_fail_count("user1", "xclid")
+
+    await pool_mock.reset_locks()
+
+    account = await pool_mock.get("user1")
+    assert account.locks == {}
+    assert account.global_locked_until is None
+    assert account.xclid_fail_count == 0
+
+
+async def test_reactivate_requires_session_and_clears_health(pool_mock: AccountsPool, monkeypatch):
+    await pool_mock.add_account_cookies("user1", "auth_token=a; ct0=b")
+    await pool_mock.add_account("user2", "pass2", "email2", "ep2")
+    for x in ("user1", "user2"):
+        await pool_mock.mark_inactive(x, "banned")
+    await pool_mock.incr_fail_count("user1", "xclid")
+
+    warnings = []
+    monkeypatch.setattr("twscrape.accounts_pool.logger.warning", warnings.append)
+    await pool_mock.reactivate(["user1", "user2", "nope"])
+
+    user1 = await pool_mock.get("user1")
+    assert user1.active is True
+    assert user1.xclid_fail_count == 0
+    user2 = await pool_mock.get("user2")
+    assert user2.active is False
+    assert warnings == [
+        "Account nope not found",
+        "Account user2 has no session, use relogin or add_cookie",
+    ]
+
+
+async def test_migration_adds_health_columns_without_losing_rows(db_dsn):
+    pool = AccountsPool(db_dsn)
+    try:
+        await pool.add_account_cookies("user1", "auth_token=t; ct0=c")
+        for column in ("xclid_fail_count", "unknown_fail_count", "global_locked_until", "mfa_code"):
+            await pool._db.execute(f"ALTER TABLE accounts DROP COLUMN {column}")
+        await pool._db.execute("UPDATE _meta SET `value` = '1' WHERE `key` = 'user_version'")
+    finally:
+        await pool.aclose()
+
+    migrated = AccountsPool(db_dsn)
+    try:
+        account = await migrated.get("user1")
+        assert account.cookies == {"auth_token": "t", "ct0": "c"}
+        assert account.xclid_fail_count == 0
+        assert account.unknown_fail_count == 0
+    finally:
+        await migrated.aclose()
+
+
+async def test_concurrent_acquire_release_does_not_deadlock(pool_mock: AccountsPool):
+    for index in range(16):
+        await pool_mock.add_account_cookies(
+            f"user{index:02d}", f"auth_token=t{index}; ct0=c{index}"
+        )
+
+    async def worker(seed):
+        for _ in range(20):
+            account = await pool_mock.get_for_queue("SearchTimeline")
+            if account is not None:
+                await pool_mock.unlock(account.username, "SearchTimeline", 1, tx=account._tx)
+            await asyncio.sleep(0)
+
+    results = await asyncio.gather(*(worker(seed) for seed in range(32)), return_exceptions=True)
+    failures = [x for x in results if isinstance(x, BaseException)]
+    assert failures == []
+
+
+def test_default_db_is_resolved_at_construction(monkeypatch):
+    monkeypatch.setenv("TWS_DB", "mysql://user:pass@example.test/custom")
+    pool = AccountsPool()
+    assert pool._db_file == "mysql://user:pass@example.test/custom"
+
+
+async def test_no_account_log_includes_active_count(pool_mock: AccountsPool, monkeypatch):
+    await pool_mock.add_account_cookies("user1", "auth_token=t; ct0=c")
+    await pool_mock.get_for_queue("SearchTimeline")  # lease the only account
+
+    pool = AccountsPool(pool_mock._db_file)
+    messages = []
+
+    async def stop(_):
+        raise RuntimeError("stop-after-log")
+
+    from twscrape.logger import logger
+
+    monkeypatch.setattr(logger, "info", messages.append)
+    monkeypatch.setattr("twscrape.accounts_pool.asyncio.sleep", stop)
+    try:
+        with pytest.raises(RuntimeError, match="stop-after-log"):
+            await pool.get_for_queue_or_wait("SearchTimeline")
+    finally:
+        await pool.aclose()
+
+    assert len(messages) == 1
+    assert messages[0].startswith(
+        'No account available for queue "SearchTimeline". Active accounts: 1.'
+    )

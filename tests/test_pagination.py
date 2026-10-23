@@ -268,3 +268,83 @@ async def test_search_stops_on_repeated_page_with_new_cursor(monkeypatch, api_mo
 
     assert len(reps) == 1
     assert calls == 2
+
+
+# --- MySQL branch pagination options ---
+
+
+import pytest  # noqa: E402
+
+from twscrape.api import DEFAULT_MAX_EMPTY_PAGES  # noqa: E402
+
+
+@pytest.mark.parametrize("maximum, expected", [(0, 1), (1, 1), (2, 2), (5, 5)])
+async def test_configurable_empty_pages(api_mock: API, monkeypatch, maximum, expected):
+    idx = 0
+
+    async def mock_get(self, url, params=None):
+        nonlocal idx
+        idx += 1
+        return FakeRep(make_promo_page(f"cursor_{idx}"))
+
+    monkeypatch.setattr(QueueClient, "get", mock_get)
+    api_mock.max_empty_pages = maximum
+
+    assert await gather(api_mock.followers_raw(123)) == []
+    assert idx == expected
+
+
+async def test_empty_page_counter_resets_on_content(api_mock: API, monkeypatch):
+    pages = [
+        make_promo_page("a"),
+        make_content_page("tweet-1", "b"),
+        make_promo_page("c"),
+    ]
+    idx = 0
+
+    async def mock_get(self, url, params=None):
+        nonlocal idx
+        page = pages[idx] if idx < len(pages) else None
+        idx += 1
+        return FakeRep(page) if page else None
+
+    monkeypatch.setattr(QueueClient, "get", mock_get)
+    api_mock.max_empty_pages = 2
+
+    responses = await gather(api_mock._gql_items("id/SearchTimeline", {}))
+    assert len(responses) == 1
+    assert idx == 4
+
+
+def test_showmorethreads_falls_back_to_bottom_cursor():
+    page = make_promo_page("bottom")
+    assert API()._get_cursor(page, "ShowMoreThreads") == "bottom"
+
+
+def test_empty_conversation_modules_are_filtered():
+    page = {
+        "entries": [
+            {
+                "entryId": "conversationthread-1",
+                "content": {"__typename": "TimelineTimelineModule", "items": []},
+            },
+            {
+                "entryId": "conversationthread-2",
+                "content": {
+                    "__typename": "TimelineTimelineModule",
+                    "items": [{"entryId": "tweet-1"}],
+                },
+            },
+            {"entryId": "tweet-1", "content": {}},
+        ]
+    }
+
+    assert [x["entryId"] for x in API()._gql_entries(page)] == [
+        "conversationthread-2",
+        "tweet-1",
+    ]
+
+
+def test_empty_page_default():
+    assert DEFAULT_MAX_EMPTY_PAGES == 3
+    assert API().max_empty_pages == 3

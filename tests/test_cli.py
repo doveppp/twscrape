@@ -8,27 +8,37 @@ import pytest
 from tests.test_parser import fake_rep
 from twscrape import ApiError, UserParseError, XClIdParseError, cli
 
+DUMMY_DSN = "mysql://u:p@127.0.0.1:3306/test"
 
-def test_reactivate_command(tmp_path, monkeypatch):
-    db_path = tmp_path / "accounts.db"
-    pool = cli.AccountsPool(db_path)
 
+def test_reactivate_command(db_dsn, monkeypatch):
     async def add_inactive_accounts():
-        for x in ("user1", "user2"):
-            await pool.add_account(x, "pass1", "email1", "ep1", cookies="auth_token=a; ct0=b")
-            await pool.mark_inactive(x, "session expired")
+        pool = cli.AccountsPool(db_dsn)
+        try:
+            for x in ("user1", "user2"):
+                await pool.add_account(x, "pass1", "email1", "ep1", cookies="auth_token=a; ct0=b")
+                await pool.mark_inactive(x, "session expired")
+        finally:
+            await pool.aclose()
 
     asyncio.run(add_inactive_accounts())
     monkeypatch.setenv("TWS_TELEMETRY", "0")
-    argv = ["twscrape", "--db", str(db_path), "reactivate", "user1", "user2"]
+    argv = ["twscrape", "--db", db_dsn, "reactivate", "user1", "user2"]
     monkeypatch.setattr(cli.sys, "argv", argv)
 
     cli.run()
 
-    for x in ("user1", "user2"):
-        account = asyncio.run(pool.get(x))
-        assert account.active is True
-        assert account.error_msg is None
+    async def check():
+        pool = cli.AccountsPool(db_dsn)
+        try:
+            for x in ("user1", "user2"):
+                account = await pool.get(x)
+                assert account.active is True
+                assert account.error_msg is None
+        finally:
+            await pool.aclose()
+
+    asyncio.run(check())
 
 
 @pytest.mark.parametrize(
@@ -47,7 +57,7 @@ def test_request_error_exits_with_one_line(tmp_path, monkeypatch, error):
     monkeypatch.setenv("TWS_TELEMETRY", "0")
     monkeypatch.setattr(cli.API, "user_by_id", mock_user_by_id)
     monkeypatch.setattr(cli.logger, "error", logs.append)
-    db_path = str(tmp_path / "accounts.db")
+    db_path = DUMMY_DSN
     monkeypatch.setattr(cli.sys, "argv", ["twscrape", "--db", db_path, "user_by_id", "123"])
 
     with pytest.raises(SystemExit) as exc:
@@ -69,7 +79,7 @@ async def test_add_cookie_uses_arg_cookies(tmp_path, monkeypatch):
     args = argparse.Namespace(
         command="add_cookie",
         debug=False,
-        db=str(tmp_path / "test.db"),
+        db=DUMMY_DSN,
         email_first=False,
         manual=False,
         username="user1",
@@ -99,7 +109,7 @@ async def test_add_cookie_prompts_securely_when_missing(tmp_path, monkeypatch):
     args = argparse.Namespace(
         command="add_cookie",
         debug=False,
-        db=str(tmp_path / "test.db"),
+        db=DUMMY_DSN,
         email_first=False,
         manual=False,
         username="user1",
@@ -128,7 +138,7 @@ async def test_add_cookie_reads_stdin(tmp_path, monkeypatch):
     args = argparse.Namespace(
         command="add_cookie",
         debug=False,
-        db=str(tmp_path / "test.db"),
+        db=DUMMY_DSN,
         email_first=False,
         manual=False,
         username="user1",
@@ -152,7 +162,7 @@ async def test_add_accounts_prints_next_step(tmp_path, monkeypatch, capsys):
     args = argparse.Namespace(
         command="add_accounts",
         debug=False,
-        db=str(tmp_path / "test.db"),
+        db=DUMMY_DSN,
         email_first=False,
         manual=False,
         file_path="accounts.txt",
@@ -178,7 +188,7 @@ async def test_search_prints_parsed_tweets(tmp_path, monkeypatch, capsys):
     args = argparse.Namespace(
         command="search",
         debug=False,
-        db=str(tmp_path / "test.db"),
+        db=DUMMY_DSN,
         email_first=False,
         manual=False,
         raw=False,
@@ -205,7 +215,7 @@ async def test_user_by_id_prints_parsed_user(tmp_path, monkeypatch, capsys):
     args = argparse.Namespace(
         command="user_by_id",
         debug=False,
-        db=str(tmp_path / "test.db"),
+        db=DUMMY_DSN,
         email_first=False,
         manual=False,
         raw=False,
@@ -229,7 +239,7 @@ async def test_user_by_login_prints_parsed_user(tmp_path, monkeypatch, capsys):
     args = argparse.Namespace(
         command="user_by_login",
         debug=False,
-        db=str(tmp_path / "test.db"),
+        db=DUMMY_DSN,
         email_first=False,
         manual=False,
         raw=False,
@@ -253,7 +263,7 @@ async def test_tweet_details_raw_prints_raw_json(tmp_path, monkeypatch, capsys):
     args = argparse.Namespace(
         command="tweet_details",
         debug=False,
-        db=str(tmp_path / "test.db"),
+        db=DUMMY_DSN,
         email_first=False,
         manual=False,
         raw=True,

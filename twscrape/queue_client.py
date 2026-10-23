@@ -1,7 +1,10 @@
 import asyncio
 import json
+import math
 import os
 import re
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from enum import Enum, auto
 from typing import Any
 from urllib.parse import urlparse
@@ -19,18 +22,45 @@ from .http import (
     format_error,
 )
 from .logger import LogOnce, logger
-from .utils import utc
+from .utils import rate_limiter, utc
 from .xclid import XClIdAccountError, XClIdGen, XClIdParseError
 
 ReqParams = dict[str, str | int] | None
 MISSING_FEATURES_RE = re.compile(r"The following features cannot be null: ([^;]+)")
 TMP_TS = utc.now().isoformat().split(".")[0].replace("T", "_").replace(":", "-")[0:16]
 
+# Per-request cap: how many accounts may hit XClId 404 exhaustion before aborting.
+MAX_XCLID_FAILED_ACCOUNTS = 10
+# Consecutive XClIdRetryExhaustedError per account before deactivating it.
+XCLID_FAIL_DEACTIVATE_THRESHOLD = 3
+# Lock duration applied to an account on each XClIdRetryExhaustedError (seconds).
+XCLID_FAIL_LOCK_SECONDS = 1 * 60
+# Consecutive unknown errors (retry budget exhausted) before deactivating an account.
+UNKNOWN_FAIL_DEACTIVATE_THRESHOLD = 3
+# Lock duration applied to an account on each unknown error (seconds).
+UNKNOWN_FAIL_LOCK_SECONDS = 60 * 15
+# Lock duration applied when X serves a logged-out web build (seconds).
+XCLID_ACCOUNT_FAIL_LOCK_SECONDS = 60 * 15
+# Upper bound for honouring a Retry-After header on an edge (Cloudflare) rate limit.
+BLOCKED_MAX_SLEEP_SECONDS = 60 * 10
+
 
 class HandledError(Exception): ...
 
 
 class AbortReqError(Exception): ...
+
+
+class XClIdRetryExhaustedError(AbortReqError):
+    """HTTP 404 persists after 3 retries with a fresh x-client-transaction-id."""
+
+
+class BlockedError(Exception):
+    """Edge (Cloudflare) rate limit: retryable after a backoff, unlike a hard block."""
+
+    def __init__(self, msg: str, retry_after: float | None = None):
+        super().__init__(msg)
+        self.retry_after = retry_after
 
 
 class GqlFeaturesOutdatedError(AbortReqError):
@@ -49,6 +79,7 @@ class ApiError(AbortReqError):
 class FailKind(Enum):
     TRANSPORT = auto()
     LOADSHED = auto()
+    BLOCKED = auto()
     UNKNOWN = auto()
 
 
@@ -77,7 +108,7 @@ class Ctx:
         self.acc = acc
         self.clt = clt
         self.proxy = proxy
-        self.fails = {FailKind.TRANSPORT: 0, FailKind.LOADSHED: 0, FailKind.UNKNOWN: 0}
+        self.fails = dict.fromkeys(FailKind, 0)
 
     def fail(self, kind: FailKind) -> bool:
         """Count a failed attempt of this kind, return whether it's still worth retrying."""
@@ -85,11 +116,11 @@ class Ctx:
         self.fails[kind] += 1
         return self.fails[kind] < fail_limit and sum(self.fails.values()) < total_fail_limit
 
-    async def retry(self, kind: FailKind) -> bool:
+    async def retry(self, kind: FailKind, delay: float | None = None) -> bool:
         """Count a failure and back off while retry budget remains."""
         if not self.fail(kind):
             return False
-        await asyncio.sleep(2 ** self.fails[kind])
+        await asyncio.sleep(delay if delay is not None else 2 ** self.fails[kind])
         return True
 
     async def aclose(self):
@@ -109,6 +140,7 @@ class Ctx:
                 fresh=tries > 0,
             )
             hdr = {"x-client-transaction-id": gen.calc(method, path)}
+            await rate_limiter.acquire()  # process-wide QPS ceiling, every real request
             rep = await self.clt.request(method, url, params=params, headers=hdr)
             if rep.status_code != 404:
                 return rep
@@ -117,8 +149,9 @@ class Ctx:
             logger.debug(f"Retrying request with new x-client-transaction-id: {url}")
             await asyncio.sleep(1)
 
-        raise AbortReqError(
-            "Failed to get XClIdGen. See: https://github.com/vladkens/twscrape/issues/248"
+        raise XClIdRetryExhaustedError(
+            "Failed to get XClIdGen after 3 retries. "
+            "See: https://github.com/vladkens/twscrape/issues/248"
         )
 
 
@@ -145,6 +178,27 @@ def has_data(rep: Response, res: Any) -> bool:
 
 def has_error(errors: list[str], prefix: str) -> bool:
     return any(error.startswith(prefix) for error in errors)
+
+
+def retry_after_seconds(rep: Response) -> float | None:
+    """Read Retry-After (delta-seconds or HTTP-date), capped and clamped to >= 0."""
+    value = rep.headers.get("retry-after")
+    if not value:
+        return None
+
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        when = when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
+        seconds = (when - utc.now()).total_seconds()
+
+    if not math.isfinite(seconds):
+        return None
+    return min(max(seconds, 0.0), BLOCKED_MAX_SLEEP_SECONDS)
 
 
 def parse_missing_features(msg: str) -> list[str]:
@@ -221,23 +275,72 @@ class QueueClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self._close_ctx()
 
-    async def _close_ctx(self, reset_at=-1, inactive=False, msg: str | None = None):
+    async def _close_ctx(
+        self, reset_at=-1, inactive=False, msg: str | None = None, global_lock=False
+    ):
         if self.ctx is None:
             return
 
         ctx, self.ctx, self.req_count = self.ctx, None, 0
         username = ctx.acc.username
+        tx = ctx.acc._tx
         await ctx.aclose()
 
         if inactive:
-            await self.pool.mark_inactive(username, msg)
+            await self.pool.mark_inactive(username, msg, tx=tx)
             return
 
         if reset_at > 0:
-            await self.pool.lock_until(ctx.acc.username, self.queue, reset_at, ctx.req_count)
+            await self.pool.lock_until(
+                username, self.queue, reset_at, ctx.req_count, tx=tx, global_lock=global_lock
+            )
             return
 
-        await self.pool.unlock(ctx.acc.username, self.queue, ctx.req_count)
+        await self.pool.unlock(username, self.queue, ctx.req_count, tx=tx)
+
+    async def _xclid_failure(self, ctx: Ctx, exc: Exception, lock_seconds: int):
+        """Persist an account-level transaction-id failure and rotate it out."""
+        username = ctx.acc.username
+        count = await self.pool.incr_fail_count(username, "xclid")
+        self._xclid_failed_accounts += 1
+        message = self._format_ctx_error(ctx, exc)
+
+        if count >= XCLID_FAIL_DEACTIVATE_THRESHOLD:
+            logger.warning(
+                f"Transaction-id failure {count}/{XCLID_FAIL_DEACTIVATE_THRESHOLD}; "
+                f"deactivating account: {username}"
+            )
+            await self._close_ctx(inactive=True, msg=message)
+        else:
+            logger.warning(
+                f"Transaction-id failure {count}/{XCLID_FAIL_DEACTIVATE_THRESHOLD}; "
+                f"locking {username} for {lock_seconds // 60} minutes (global)"
+            )
+            await self._close_ctx(utc.ts() + lock_seconds, global_lock=True)
+
+        if self._xclid_failed_accounts >= MAX_XCLID_FAILED_ACCOUNTS:
+            raise AbortReqError(
+                f"Transaction-id failures persist after trying {MAX_XCLID_FAILED_ACCOUNTS} accounts"
+            ) from exc
+
+    async def _unknown_failure(self, ctx: Ctx, err: str):
+        """Persist an exhausted unknown-error budget and rotate the account out."""
+        username = ctx.acc.username
+        count = await self.pool.incr_fail_count(username, "unknown")
+
+        if count >= UNKNOWN_FAIL_DEACTIVATE_THRESHOLD:
+            logger.warning(
+                f"Unknown error {count}/{UNKNOWN_FAIL_DEACTIVATE_THRESHOLD}; "
+                f"deactivating account: {username}; Err: {err}"
+            )
+            await self._close_ctx(inactive=True, msg=err)
+        else:
+            lock_min = UNKNOWN_FAIL_LOCK_SECONDS // 60
+            logger.warning(
+                f"Unknown error {count}/{UNKNOWN_FAIL_DEACTIVATE_THRESHOLD}; "
+                f"locking {username} for {lock_min} minutes (global). Err: {err}"
+            )
+            await self._close_ctx(utc.ts() + UNKNOWN_FAIL_LOCK_SECONDS, global_lock=True)
 
     async def _get_ctx(self) -> Ctx | None:
         if self.ctx:
@@ -247,8 +350,12 @@ class QueueClient:
         if acc is None:
             return None
 
-        clt = acc.make_client(proxy=self.proxy)
-        self.ctx = Ctx(acc, clt, proxy=acc.resolve_proxy(self.proxy))
+        try:
+            clt = acc.make_client(proxy=self.proxy)
+            self.ctx = Ctx(acc, clt, proxy=acc.resolve_proxy(self.proxy))
+        except BaseException:
+            await self.pool.unlock(acc.username, self.queue, tx=acc._tx)
+            raise
         return self.ctx
 
     def _format_ctx_error(self, ctx: Ctx, error: Exception | str) -> str:
@@ -271,6 +378,9 @@ class QueueClient:
             src = "Cloudflare" if "cf-ray" in rep.headers else "HTML"
             msg = f"Blocked by {src}: {rep.status_code} - {req_id(rep)}"
             logger.warning(msg)
+            if rep.status_code == 429:
+                # Edge rate limit, not an account problem: back off and retry same account
+                raise BlockedError(msg, retry_after_seconds(rep))
             raise AbortReqError(msg)
 
         try:
@@ -364,6 +474,8 @@ class QueueClient:
             add_missing_features(params, list(healed))
 
         features_retried = False
+        self._xclid_failed_accounts = 0
+
         while True:
             # 1. same ctx until _close_ctx() clears it — that's retry vs rotate
             # 2. no aclose() needed here, __aexit__ handles it
@@ -395,6 +507,7 @@ class QueueClient:
 
                 ctx.req_count += 1  # count only successful
                 ctx.fails = dict.fromkeys(ctx.fails, 0)  # budget is per request, not per crawl
+                await self._reset_fail_counts(ctx.acc)
                 return rep
             except GqlFeaturesOutdatedError as e:
                 # X names the flags it wants, so set them and retry once. GQL_FEATURES still
@@ -414,6 +527,9 @@ class QueueClient:
                     "set true for now. Update GQL_FEATURES in api.py to fix this permanently.",
                 )
                 continue
+            except XClIdRetryExhaustedError as e:
+                await self._xclid_failure(ctx, e, XCLID_FAIL_LOCK_SECONDS)
+                continue
             except AbortReqError:
                 # abort all queries; raise rather than return None, which callers
                 # can't tell from "no data"
@@ -421,9 +537,18 @@ class QueueClient:
             except HandledError:
                 # retry with new account
                 continue
+            except BlockedError as e:
+                # rotating accounts does not help an edge-level limit, so wait it out first
+                if await ctx.retry(FailKind.BLOCKED, delay=e.retry_after):
+                    logger.info(f"Retrying after edge rate limit; delay={e.retry_after}")
+                    continue
+
+                logger.error(f"Edge rate limit persists; aborting {method} {url}")
+                raise AbortReqError(str(e)) from e
             except XClIdAccountError as e:
-                logger.warning(self._format_ctx_error(ctx, e))
-                await self._close_ctx(utc.ts() + 60 * 15)
+                # A logged-out session is an account-level problem: persist it and
+                # freeze the account for every queue instead of only this one.
+                await self._xclid_failure(ctx, e, XCLID_ACCOUNT_FAIL_LOCK_SECONDS)
                 continue
             except XClIdParseError as e:
                 logger.error(
@@ -444,12 +569,16 @@ class QueueClient:
                 if ctx.fail(FailKind.UNKNOWN):
                     continue
 
-                msg = [
-                    "Unknown error. Account timeouted for 15 minutes.",
-                    "Create issue please: https://github.com/vladkens/twscrape/issues",
-                    "If it mistake, you can unlock accounts with `twscrape reset_locks`. "
-                    f"Err: {self._format_ctx_error(ctx, e)}",
-                ]
+                # Retry budget for this account is exhausted: persist the failure and
+                # freeze (or deactivate) the account so every queue stops picking it.
+                await self._unknown_failure(ctx, self._format_ctx_error(ctx, e))
+                continue
 
-                logger.warning(" ".join(msg))
-                await self._close_ctx(utc.ts() + 60 * 15)  # 15 minutes
+    async def _reset_fail_counts(self, acc: Account):
+        """Clear persisted consecutive-failure counters after a success."""
+        if acc.xclid_fail_count:
+            await self.pool.reset_fail_count(acc.username, "xclid")
+            acc.xclid_fail_count = 0
+        if acc.unknown_fail_count:
+            await self.pool.reset_fail_count(acc.username, "unknown")
+            acc.unknown_fail_count = 0

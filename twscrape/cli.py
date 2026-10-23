@@ -5,13 +5,12 @@ import asyncio
 import getpass
 import io
 import json
-import sqlite3
 import sys
 from importlib.metadata import version
 
 from . import telemetry
 from .api import API, AccountsPool
-from .db import get_sqlite_version
+from .db import default_db
 from .http import Response
 from .logger import logger, set_log_level
 from .login import LoginConfig
@@ -54,13 +53,19 @@ async def main(args):
 
     if args.command == "version":
         print(f"twscrape: {version('twscrape')}")
-        print(f"SQLite runtime: {sqlite3.sqlite_version} ({await get_sqlite_version()})")
+        print("Account storage: MySQL")
         return
 
     login_config = LoginConfig(getattr(args, "email_first", False), getattr(args, "manual", False))
     pool = AccountsPool(args.db, login_config=login_config)
     api = API(pool, debug=args.debug)
+    try:
+        await _dispatch(args, pool, api)
+    finally:
+        await pool.aclose()
 
+
+async def _dispatch(args, pool, api):
     if args.command == "accounts":
         print_table([dict(x) for x in await pool.accounts_info()])
         return
@@ -171,7 +176,11 @@ def custom_help(p):
 
 def run():
     p = argparse.ArgumentParser(add_help=False, formatter_class=CustomHelpFormatter)
-    p.add_argument("--db", default="accounts.db", help="Accounts database file")
+    p.add_argument(
+        "--db",
+        default=default_db(),
+        help="MySQL DSN, eg. mysql://user:pass@host:3306/db (env: TWS_DB)",
+    )
     p.add_argument("--debug", action="store_true", help="Enable debug mode")
     subparsers = p.add_subparsers(dest="command")
 

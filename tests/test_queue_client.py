@@ -2,6 +2,7 @@ import json
 import pickle
 from collections import OrderedDict
 from contextlib import aclosing
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -17,7 +18,7 @@ from twscrape.queue_client import (
     ReqParams,
     XClIdGenStore,
 )
-from twscrape.utils import utc
+from twscrape.utils import rate_limiter, utc
 from twscrape.xclid import XClIdAccountError, XClIdGen, XClIdParseError
 
 from .mock_http import MockClient
@@ -934,21 +935,24 @@ async def test_close_ctx_noop_when_ctx_is_none(pool_mock: AccountsPool):
     await client._close_ctx()
 
 
-async def test_404_retries_exhaust_and_abort(client_fixture: CF):
-    from unittest.mock import patch
-
+async def test_404_retries_exhaust_and_rotate_then_stop(client_fixture: CF):
     pool, client, mock = client_fixture
+    pool._wait_timeout = 0
     await client.__aenter__()
 
     mock.add_response(status_code=404, json={})
     mock.add_response(status_code=404, json={})
     mock.add_response(status_code=404, json={})
+    mock.add_response(status_code=404, json={})
+    mock.add_response(status_code=404, json={})
+    mock.add_response(status_code=404, json={})
 
-    with (
-        patch("twscrape.queue_client.asyncio.sleep"),
-        pytest.raises(AbortReqError, match="XClIdGen"),
-    ):
-        await client.get(URL)
+    with patch("twscrape.queue_client.asyncio.sleep"):
+        assert await client.get(URL) is None
+
+    # both accounts exhausted their transaction-id retries and are globally cooled
+    accounts = await pool.get_all()
+    assert all(x.global_locked_until is not None for x in accounts)
 
     await client.__aexit__(None, None, None)
 
@@ -1169,3 +1173,121 @@ async def test_xclid_parse_error_aborts_without_account_state_change(
     assert "backend=unknown" in messages[0]
     assert "proxy=True" in messages[0]
     assert "secret" not in messages[0]
+
+
+# --- MySQL integration: edge limits and account health ---
+
+
+async def test_edge_429_retries_same_account_and_honors_retry_after(
+    client_fixture: CF, monkeypatch
+):
+    pool, client, mock = client_fixture
+    sleep = AsyncMock()
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", sleep)
+    mock.add_response(status_code=429, headers={"content-type": "text/html", "retry-after": "7"})
+    mock.add_response(json={"ok": True})
+
+    rep = await client.get(URL)
+
+    assert getattr(rep, "__username") == "user1"
+    sleep.assert_awaited_once_with(7.0)
+    assert (await pool.get("user1")).active
+
+
+async def test_edge_429_gives_up_after_three_attempts(client_fixture: CF, monkeypatch):
+    _, client, mock = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", AsyncMock())
+    for _ in range(3):
+        mock.add_response(status_code=429, headers={"content-type": "text/html"})
+
+    with pytest.raises(AbortReqError, match="Blocked by"):
+        await client.get(URL)
+
+
+async def test_every_404_attempt_is_rate_limited(client_fixture: CF, monkeypatch):
+    _, client, mock = client_fixture
+    acquire = AsyncMock()
+    monkeypatch.setattr(rate_limiter, "acquire", acquire)
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", AsyncMock())
+    mock.add_response(status_code=404).add_response(json={"ok": True})
+
+    assert await client.get(URL) is not None
+    assert acquire.await_count == 2
+
+
+async def test_xclid_404_cools_account_globally_and_rotates(client_fixture: CF, monkeypatch):
+    pool, client, mock = client_fixture
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", AsyncMock())
+    for _ in range(3):
+        mock.add_response(status_code=404)
+    mock.add_response(json={"ok": True})
+
+    rep = await client.get(URL)
+
+    assert getattr(rep, "__username") == "user2"
+    user1 = await pool.get("user1")
+    assert user1.active is True
+    assert user1.xclid_fail_count == 1
+    assert user1.global_locked_until is not None
+    # the global freeze also blocks the account on another queue
+    assert await pool.get_for_queue("TweetDetail") is None
+
+
+async def test_logged_out_failures_deactivate_after_threshold(pool_mock: AccountsPool, monkeypatch):
+    mock = MockClient()
+    monkeypatch.setattr(Account, "make_client", lambda self, proxy=None: mock)
+    await pool_mock.add_account_cookies("user1", "auth_token=t; ct0=c")
+    await pool_mock.incr_fail_count("user1", "xclid")
+    await pool_mock.incr_fail_count("user1", "xclid")
+
+    async def fake_get(cls, username, proxy=None, cookies=None, fresh=False):
+        raise XClIdAccountError("Logged-out X web app")
+
+    monkeypatch.setattr(XClIdGenStore, "get", classmethod(fake_get))
+
+    client = QueueClient(pool_mock, "SearchTimeline")
+    assert await client.get(URL) is None
+
+    account = await pool_mock.get("user1")
+    assert account.active is False
+    assert account.xclid_fail_count == 0
+    assert "Logged-out" in (account.error_msg or "")
+
+
+async def test_unknown_failures_persist_and_success_resets(client_fixture: CF):
+    pool, client, mock = client_fixture
+    await pool.incr_fail_count("user2", "unknown")
+    for _ in range(3):
+        mock.add_exception(ValueError("bad request implementation"))
+    mock.add_response(json={"ok": True})
+
+    assert await client.get(URL) is not None
+    assert (await pool.get("user1")).unknown_fail_count == 1
+    assert (await pool.get("user2")).unknown_fail_count == 0
+
+
+async def test_api_failure_is_not_an_unknown_account_failure(client_fixture: CF):
+    pool, client, mock = client_fixture
+    mock.add_response(json={"errors": [{"code": 999, "message": "unknown API failure"}]})
+
+    with pytest.raises(ApiError):
+        await client.get(URL)
+
+    assert (await pool.get("user1")).unknown_fail_count == 0
+
+
+async def test_rate_limit_pause_clears_lease_but_not_health(client_fixture: CF):
+    pool, client, mock = client_fixture
+    await client.__aenter__()
+    await pool.incr_fail_count("user1", "xclid")
+
+    mock.add_response(
+        headers={"x-rate-limit-remaining": "0", "x-rate-limit-reset": "9999999999"},
+    )
+    mock.add_response(json={"ok": True})
+
+    assert await client.get(URL) is not None
+
+    user1 = await pool.get("user1")
+    assert user1.locks.get("SearchTimeline") is not None
+    assert user1.xclid_fail_count == 1

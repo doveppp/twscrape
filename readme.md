@@ -10,7 +10,7 @@
 
 </div>
 
-twscrape is an async Python library and CLI for X/Twitter Search and GraphQL endpoints. It runs on your own account pool, keeps sessions in SQLite, rotates accounts when an endpoint is rate-limited, and returns either parsed SNScrape-style models or raw API responses.
+twscrape is an async Python library and CLI for X/Twitter Search and GraphQL endpoints. It runs on your own account pool, keeps sessions in MySQL, rotates accounts when an endpoint is rate-limited, and returns either parsed SNScrape-style models or raw API responses.
 
 <div align="center">
   <img src=".github/example.png" alt="example of cli usage" height="400px">
@@ -22,7 +22,13 @@ twscrape is an async Python library and CLI for X/Twitter Search and GraphQL end
 pip install twscrape
 ```
 
-`httpx` is the default HTTP backend. For browser-like TLS fingerprinting, install the optional `curl-cffi` backend:
+Accounts are stored in MySQL 8.0.19+ (tested with MySQL 8.4). Create a database first and pass its DSN through `TWS_DB` or `--db`:
+
+```bash
+export TWS_DB='mysql://user:password@127.0.0.1:3306/twscrape'
+```
+
+The user needs permission to create the `accounts` and `_meta` tables on first run. URL-encode special characters in the username or password. `httpx` is the default HTTP backend. For browser-like TLS fingerprinting, install the optional `curl-cffi` backend:
 
 ```bash
 pip install "twscrape[curl]"
@@ -64,7 +70,7 @@ twscrape accounts
 twscrape search "from:xdevelopers lang:en" --limit=20
 ```
 
-`my_account` is a local identifier; twscrape does not verify that it matches the X username stored in the cookies. Run the same command again to replace its saved session while preserving credentials, statistics, locks, and proxy settings.
+`my_account` is a local identifier; twscrape does not verify that it matches the X username stored in the cookies. Run the same command again to replace its saved session while preserving credentials, statistics, and proxy settings.
 
 Alternatively, let the CLI prompt securely for cookies copied from x.com -> DevTools (F12) -> Application -> Cookies:
 
@@ -86,7 +92,7 @@ from twscrape import API, gather
 
 
 async def main():
-    api = API()  # or API("accounts.db")
+    api = API()  # uses TWS_DB, or pass a DSN: API("mysql://user:pass@host:3306/twscrape")
 
     # Add once; the session is stored in the account database.
     await api.pool.add_account_cookies("my_account", "auth_token=xxx; ct0=yyy")
@@ -117,6 +123,8 @@ api = API(raise_when_no_account=True, wait_timeout=30, wait_interval=1)
 ```
 
 `wait_timeout` limits how long to wait for a locked account, `wait_interval` controls how often the pool checks again, and `raise_when_no_account` raises `NoAccountError` instead of ending the operation. By default, twscrape waits indefinitely while active accounts are locked.
+
+Outgoing requests are limited process-wide to 5 requests/second. Set `rate_limit=10` on `API`, or `TWS_RATE_LIMIT` in the environment, to change it; `0` or `"off"` disables the limiter. The limiter applies to every account and queue in the process.
 
 X sometimes sends a tweet without its author's profile. The tweet is still returned, with a placeholder `tweet.user` (the same goes for retweeted and quoted tweets): only `id` is known, plus `username` and sometimes `displayname` when the referencing tweet names the author. Its counts are 0, `created` is the Unix epoch and `profileImageUrl` is empty, which never happens for a real profile, so check `tweet.user.profileImageUrl == ""` before storing user stats.
 
@@ -271,7 +279,7 @@ twscrape search "elon musk lang:es" --limit=20 --raw
 Use a separate account database when you need isolated account pools:
 
 ```bash
-twscrape --db research.db search "python lang:en" --limit=100
+twscrape --db 'mysql://user:pass@host:3306/research' search "python lang:en" --limit=100
 ```
 
 ## Accounts
@@ -375,12 +383,26 @@ Do not set `api.proxy` or `TWS_PROXY` when you want per-account proxies to be us
 
 ## Environment
 
+- `TWS_DB` - MySQL DSN, default `mysql://root@127.0.0.1:3306/twscrape`
+- `TWS_RATE_LIMIT` - process-wide requests/second, default `5`; `0` or `off` disables it
+- `TWS_MAX_EMPTY_PAGES` - consecutive raw empty pages tolerated before pagination stops, default `3`
 - `TWS_PROXY` - global proxy for all accounts
 - `TWS_WAIT_EMAIL_CODE` - email verification timeout in seconds, default `30`
 - `TWS_RAISE_WHEN_NO_ACCOUNT` - raise `NoAccountError` instead of waiting; accepts `false`, `0`, `true`, `1`
 - `TWS_HTTP_BACKEND` - `httpx` or `curl`
 - `TWS_LOG_LEVEL` - logger level, default `INFO`
 - `TWS_TELEMETRY=0` - disable anonymous telemetry
+
+## Development
+
+Tests use a disposable MySQL database per test. Point them at a server whose user may create and drop `twscrape_test_*` databases:
+
+```bash
+TWS_TEST_DB='mysql://user:pass@127.0.0.1:3306/twscrape_test' uv run --frozen pytest -q
+uv run --frozen ruff format --check twscrape tests
+uv run --frozen ruff check twscrape tests
+uv run --frozen ty check twscrape tests
+```
 
 ## Telemetry
 

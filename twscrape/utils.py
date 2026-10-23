@@ -1,5 +1,7 @@
+import asyncio
 import base64
 import json
+import math
 import os
 import re
 from collections import defaultdict
@@ -446,3 +448,144 @@ def get_env_bool(key: str, default_val: bool = False) -> bool:
     if val is None:
         return default_val
     return val.lower() in ("1", "true", "yes")
+
+
+def get_env_int(key: str, default_val: int, fallback_key: str | None = None) -> int:
+    val = os.getenv(key)
+    if val is None and fallback_key:
+        val = os.getenv(fallback_key)
+    if val is None:
+        return default_val
+    try:
+        return int(val)
+    except ValueError:
+        from .logger import logger
+
+        logger.warning(f"Invalid {key}={val!r}, using {default_val}")
+        return default_val
+
+
+# --- Process-wide request rate limiting ---
+
+DEFAULT_RATE_LIMIT = 5.0
+_RATE_LIMIT_OFF_VALUES = {"", "0", "off", "none", "false", "no", "disable", "disabled"}
+
+
+def parse_rate_limit(value: str | int | float | None) -> float | None:
+    """Parse one configured rate limit into requests per second (None = disabled)."""
+    if value is None:
+        return None
+
+    if isinstance(value, int | float):
+        qps = float(value)
+    else:
+        text = str(value).strip().lower()
+        if text in _RATE_LIMIT_OFF_VALUES:
+            return None
+        text = text.split("/", 1)[0].replace("rps", "").replace("req", "").strip()
+        try:
+            qps = float(text)
+        except ValueError:
+            from .logger import logger
+
+            logger.warning(f"Invalid rate limit {value!r}, using {DEFAULT_RATE_LIMIT} req/s")
+            return DEFAULT_RATE_LIMIT
+
+    if not math.isfinite(qps):
+        return DEFAULT_RATE_LIMIT
+    return qps if qps > 0 else None
+
+
+def resolve_rate_limit(value: str | int | float | None = None) -> float | None:
+    """Explicit argument wins over the environment; both absent -> the default."""
+    raw = value
+    if raw is None:
+        raw = os.getenv("TWS_RATE_LIMIT") or os.getenv("DOVEXSCRAPE_RATE_LIMIT")
+    if raw is None:
+        return DEFAULT_RATE_LIMIT
+    return parse_rate_limit(raw)
+
+
+_UNSET = object()
+
+
+class GlobalRateLimiter:
+    """Process-wide QPS limiter shared by every QueueClient.
+
+    Wraps aiolimiter's leaky bucket with a capacity of one slot, so requests leave
+    evenly spaced (one every 1/qps seconds) instead of bursting.
+
+    The environment is read lazily, on the first use, not when ``twscrape`` is
+    imported. Without an explicit ``configure()`` call, later environment changes
+    are also picked up on the next request.
+    """
+
+    def __init__(self):
+        self._qps: float | None = None
+        self._raw = _UNSET
+        self._explicit = False
+        self._limiter = None
+        self._loop = None
+
+    def _log(self) -> None:
+        from .logger import logger
+
+        logger.info(
+            f"Global rate limit: {self._qps:g} req/s"
+            if self._qps
+            else "Global rate limit: disabled"
+        )
+
+    def _refresh(self) -> None:
+        if self._explicit:
+            return
+        raw = os.getenv("TWS_RATE_LIMIT") or os.getenv("DOVEXSCRAPE_RATE_LIMIT")
+        if raw == self._raw:
+            return
+        self._raw = raw
+        self._qps = DEFAULT_RATE_LIMIT if raw is None else parse_rate_limit(raw)
+        self._limiter = None
+        self._loop = None
+        self._log()
+
+    @property
+    def qps(self) -> float | None:
+        self._refresh()
+        return self._qps
+
+    def log_config(self) -> None:
+        """Resolve and log the effective rate limit once, at startup."""
+        self._refresh()
+
+    def configure(self, qps: float | None) -> None:
+        self._explicit = True
+        self._qps = qps
+        self._raw = _UNSET
+        self._limiter = None
+        self._loop = None
+        self._log()
+
+    async def acquire(self) -> None:
+        self._refresh()
+        qps = self._qps
+        if qps is None:
+            return
+
+        loop = asyncio.get_running_loop()
+        if self._limiter is None or self._loop is not loop:
+            from aiolimiter import AsyncLimiter
+
+            self._limiter = AsyncLimiter(1, 1 / qps)
+            self._loop = loop
+
+        await self._limiter.acquire()
+
+
+rate_limiter = GlobalRateLimiter()
+
+
+def configure_rate_limit(value: str | int | float | None = None) -> None:
+    """Apply an explicit rate limit, if one was given."""
+    if value is None:
+        return
+    rate_limiter.configure(resolve_rate_limit(value))

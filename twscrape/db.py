@@ -1,155 +1,214 @@
-import asyncio
-import random
-import sqlite3
-from collections import defaultdict
+"""MySQL storage for account data.
 
-import aiosqlite
+The connection pool belongs to one :class:`DB` instance and therefore to
+one event loop. ``AccountsPool`` owns such an instance; close it before leaving the
+loop. The schema matches the former MySQL branch so existing databases keep working.
+"""
+
+import asyncio
+import os
+import warnings
+from urllib.parse import parse_qs, unquote, urlparse
+
+import asyncmy
+from asyncmy.cursors import DictCursor
+from asyncmy.pool import Pool
 
 from .logger import logger
 
-MIN_SQLITE_VERSION = "3.24"
-
-_lock = asyncio.Lock()
+DEFAULT_DB_DSN = "mysql://root@127.0.0.1:3306/twscrape"
 
 
-def lock_retry(max_retries=10):
-    # this lock decorator has double nature:
-    # 1. it uses asyncio lock in same process
-    # 2. it retries when db locked by other process (eg. two cli instances running)
-    def decorator(func):
-        async def wrapper(*args, **kwargs):
-            for i in range(max_retries):
-                try:
-                    async with _lock:
-                        return await func(*args, **kwargs)
-                except sqlite3.OperationalError as e:
-                    if i == max_retries - 1 or "database is locked" not in str(e):
-                        raise e
-
-                    await asyncio.sleep(random.uniform(0.5, 1.0))
-
-        return wrapper
-
-    return decorator
+def default_db() -> str:
+    """Resolve TWS_DB at call time, so setting it after import still works."""
+    return os.getenv("TWS_DB", DEFAULT_DB_DSN)
 
 
-async def get_sqlite_version():
-    async with aiosqlite.connect(":memory:") as db:  # noqa: SIM117
-        async with db.execute("SELECT SQLITE_VERSION()") as cur:
-            rs = await cur.fetchone()
-            return rs[0] if rs else "3.0.0"
+POOL_MIN, POOL_MAX, POOL_RECYCLE = 1, 10, 3600
 
 
-async def check_version():
-    ver = await get_sqlite_version()
-    ver = ".".join(ver.split(".")[:2])
-
+def _as_int(value: str | None, default: int) -> int:
     try:
-        msg = f"SQLite version '{ver}' is too old, please upgrade to {MIN_SQLITE_VERSION}+"
-        if float(ver) < float(MIN_SQLITE_VERSION):
-            raise SystemError(msg)
+        return int(value) if value is not None else default
     except ValueError:
-        pass
+        return default
 
 
-async def migrate(db: aiosqlite.Connection):
-    async with db.execute("PRAGMA user_version") as cur:
-        rs = await cur.fetchone()
-        uv = rs[0] if rs else 0
-
-    async def v1():
-        qs = """
+async def _migration_v1(cur):
+    await cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS accounts (
-            username TEXT PRIMARY KEY NOT NULL COLLATE NOCASE,
+            username VARCHAR(255) NOT NULL PRIMARY KEY,
             password TEXT NOT NULL,
-            email TEXT NOT NULL COLLATE NOCASE,
+            email VARCHAR(255) NOT NULL,
             email_password TEXT NOT NULL,
             user_agent TEXT NOT NULL,
-            active BOOLEAN DEFAULT FALSE NOT NULL,
-            locks TEXT DEFAULT '{}' NOT NULL,
-            headers TEXT DEFAULT '{}' NOT NULL,
-            cookies TEXT DEFAULT '{}' NOT NULL,
+            active TINYINT NOT NULL DEFAULT 0,
+            locks JSON NOT NULL,
+            stats JSON NOT NULL,
+            headers JSON NOT NULL,
+            cookies JSON NOT NULL,
             proxy TEXT DEFAULT NULL,
-            error_msg TEXT DEFAULT NULL
-        );"""
-        await db.execute(qs)
+            error_msg TEXT DEFAULT NULL,
+            last_used DATETIME DEFAULT NULL,
+            _tx VARCHAR(64) DEFAULT NULL,
+            mfa_code VARCHAR(255) DEFAULT NULL,
+            xclid_fail_count INT NOT NULL DEFAULT 0,
+            unknown_fail_count INT NOT NULL DEFAULT 0,
+            global_locked_until DATETIME DEFAULT NULL,
+            KEY idx_accounts_active (active),
+            KEY idx_accounts_tx (_tx),
+            KEY idx_accounts_global_lock (active, global_locked_until)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci
+        """
+    )
 
-    async def v2():
-        await db.execute("ALTER TABLE accounts ADD COLUMN stats TEXT DEFAULT '{}' NOT NULL")
-        await db.execute("ALTER TABLE accounts ADD COLUMN last_used TEXT DEFAULT NULL")
 
-    async def v3():
-        await db.execute("ALTER TABLE accounts ADD COLUMN _tx TEXT DEFAULT NULL")
-
-    async def v4():
-        await db.execute("ALTER TABLE accounts ADD COLUMN mfa_code TEXT DEFAULT NULL")
-
-    migrations = {
-        1: v1,
-        2: v2,
-        3: v3,
-        4: v4,
+# Ordered migrations, append new versions instead of editing old ones.
+async def _migration_v2(cur):
+    """Add health columns to databases created before account health tracking."""
+    await cur.execute(
+        "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'accounts'"
+    )
+    existing = {x["COLUMN_NAME"] for x in await cur.fetchall()}
+    columns = {
+        "mfa_code": "VARCHAR(255) DEFAULT NULL",
+        "xclid_fail_count": "INT NOT NULL DEFAULT 0",
+        "unknown_fail_count": "INT NOT NULL DEFAULT 0",
+        "global_locked_until": "DATETIME DEFAULT NULL",
     }
+    for name, definition in columns.items():
+        if name not in existing:
+            await cur.execute(f"ALTER TABLE accounts ADD COLUMN {name} {definition}")
 
-    # logger.debug(f"Current migration v{uv} (latest v{len(migrations)})")
-    for i in range(uv + 1, len(migrations) + 1):
-        logger.info(f"Running migration to v{i}")
+
+MIGRATIONS = [_migration_v1, _migration_v2]
+
+
+async def migrate(pool: Pool) -> None:
+    """Create or upgrade the schema, tracking the applied version in ``_meta``."""
+    async with pool.acquire() as conn, conn.cursor() as cur:
+        # Serialize first-use DDL across processes as well as local coroutines.
+        await cur.execute(
+            "SELECT GET_LOCK(CONCAT('twscrape:', LEFT(DATABASE(), 50)), 30) AS acquired"
+        )
+        row = await cur.fetchone()
+        if not row or row["acquired"] != 1:
+            raise RuntimeError("Could not acquire MySQL schema migration lock")
+
         try:
-            await migrations[i]()
-        except sqlite3.OperationalError as e:
-            if "duplicate column name" not in str(e):
-                raise e
+            await cur.execute(
+                "SELECT 1 FROM information_schema.TABLES "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '_meta'"
+            )
+            if await cur.fetchone() is None:
+                await cur.execute(
+                    "CREATE TABLE _meta ("
+                    "`key` VARCHAR(50) NOT NULL PRIMARY KEY, "
+                    "`value` VARCHAR(255) NOT NULL"
+                    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci"
+                )
 
-        await db.execute(f"PRAGMA user_version = {i}")
-        await db.commit()
+            await cur.execute("SELECT `value` FROM _meta WHERE `key` = 'user_version'")
+            rs = await cur.fetchone()
+            uv = int(rs["value"]) if rs else 0
+
+            for i in range(uv + 1, len(MIGRATIONS) + 1):
+                logger.info(f"Running migration to v{i}")
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    await MIGRATIONS[i - 1](cur)
+                await cur.execute(
+                    "INSERT INTO _meta (`key`, `value`) VALUES ('user_version', %(v)s) "
+                    "ON DUPLICATE KEY UPDATE `value` = %(v)s",
+                    {"v": i},
+                )
+        finally:
+            await cur.execute("SELECT RELEASE_LOCK(CONCAT('twscrape:', LEFT(DATABASE(), 50)))")
+
+
+async def _create_pool(db_path: str) -> Pool:
+    p = urlparse(db_path)
+    if p.scheme not in ("mysql", "mysql+asyncmy") or not p.path.strip("/"):
+        raise ValueError(
+            f"Invalid database url: {db_path!r}. Expected: mysql://user:pass@host:3306/db"
+        )
+
+    qs = {k: v[-1] for k, v in parse_qs(p.query).items()}
+    return await asyncmy.create_pool(
+        host=p.hostname or "127.0.0.1",
+        port=p.port or 3306,
+        user=unquote(p.username or ""),
+        password=unquote(p.password or ""),
+        db=unquote(p.path.lstrip("/")),
+        charset=qs.get("charset", "utf8mb4"),
+        cursor_cls=DictCursor,
+        autocommit=True,
+        # Timestamps are stored and compared as UTC throughout, so pin the session
+        # time zone instead of trusting the server's SYSTEM time zone.
+        init_command="SET time_zone = '+00:00'",
+        minsize=_as_int(qs.get("pool_min"), POOL_MIN),
+        maxsize=_as_int(qs.get("pool_max"), POOL_MAX),
+        pool_recycle=_as_int(qs.get("pool_recycle"), POOL_RECYCLE),
+    )
 
 
 class DB:
-    _init_once: defaultdict[str, bool] = defaultdict(bool)
+    """One MySQL pool per DSN, created lazily and closed explicitly."""
 
-    def __init__(self, db_path):
+    def __init__(self, db_path: str):
         self.db_path = db_path
-        self.conn = None
+        self._pool: Pool | None = None
+        self._lock = asyncio.Lock()
 
-    async def __aenter__(self):
-        await check_version()
-        db = await aiosqlite.connect(self.db_path)
-        db.row_factory = aiosqlite.Row
+    async def pool(self) -> Pool:
+        async with self._lock:
+            if self._pool is None:
+                pool = await _create_pool(self.db_path)
+                try:
+                    await migrate(pool)
+                except BaseException:
+                    pool.close()
+                    await pool.wait_closed()
+                    raise
+                self._pool = pool
+            return self._pool
 
-        if not self._init_once[self.db_path]:
-            await migrate(db)
-            self._init_once[self.db_path] = True
+    async def execute(self, qs: str, params: dict | None = None):
+        pool = await self.pool()
+        async with pool.acquire() as conn, conn.cursor() as cur:
+            return await cur.execute(qs, params)
 
-        self.conn = db
-        return db
+    async def fetchone(self, qs: str, params: dict | None = None) -> dict | None:
+        pool = await self.pool()
+        async with pool.acquire() as conn, conn.cursor() as cur:
+            await cur.execute(qs, params)
+            return await cur.fetchone()
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.conn:
-            await self.conn.commit()
-            await self.conn.close()
+    async def fetchall(self, qs: str, params: dict | None = None) -> list[dict]:
+        pool = await self.pool()
+        async with pool.acquire() as conn, conn.cursor() as cur:
+            await cur.execute(qs, params)
+            return await cur.fetchall()
 
+    async def executemany(self, qs: str, params: list[dict]):
+        pool = await self.pool()
+        async with pool.acquire() as conn, conn.cursor() as cur:
+            await cur.executemany(qs, params)
 
-@lock_retry()
-async def execute(db_path: str, qs: str, params: dict | None = None):
-    async with DB(db_path) as db:
-        await db.execute(qs, params)
-
-
-@lock_retry()
-async def fetchone(db_path: str, qs: str, params: dict | None = None):
-    async with DB(db_path) as db, db.execute(qs, params) as cur:
-        row = await cur.fetchone()
-        return row
-
-
-@lock_retry()
-async def fetchall(db_path: str, qs: str, params: dict | None = None):
-    async with DB(db_path) as db, db.execute(qs, params) as cur:
-        rows = await cur.fetchall()
-        return rows
+    async def aclose(self):
+        async with self._lock:
+            pool, self._pool = self._pool, None
+            if pool is not None:
+                pool.close()
+                await pool.wait_closed()
 
 
-@lock_retry()
-async def executemany(db_path: str, qs: str, params: list[dict]):
-    async with DB(db_path) as db:
-        await db.executemany(qs, params)
+async def get_server_version(db_path: str) -> str:
+    database = DB(db_path)
+    try:
+        row = await database.fetchone("SELECT VERSION() AS version")
+        return str(row["version"]) if row else "unknown"
+    finally:
+        await database.aclose()

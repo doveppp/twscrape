@@ -1,3 +1,19 @@
+## Unreleased
+
+### Breaking Changes
+
+- Account storage now uses MySQL instead of SQLite. Configure the server with `TWS_DB` or `--db`, eg. `mysql://user:pass@host:3306/twscrape`; existing SQLite databases are not migrated
+- Accounts are leased exclusively across queues; one account never serves two concurrent requests
+- Account acquisition no longer scans and locks a range of rows: a lock-free candidate read plus a single-row compare-and-set removes the deadlock and lock-wait pattern of the old transaction
+
+### Features
+
+- Persisted account health: consecutive transaction-id and unknown failures cool an account globally and deactivate it after three failures
+- Process-wide request limiter (`TWS_RATE_LIMIT`, default 5 req/s) and `Retry-After` backoff for edge HTML 429 responses
+- Configurable empty-page tolerance (`TWS_MAX_EMPTY_PAGES`), reply pagination fallback for `ShowMoreThreads`, and filtering of empty conversation modules
+
+---
+
 ## v0.21.0 – 2026-10-21
 
 ### Breaking Changes

@@ -1,6 +1,18 @@
+import asyncio
+
 import pytest
 
-from twscrape.utils import get_env_bool, parse_cookies, parse_proxy, to_old_obj
+from twscrape.utils import (
+    GlobalRateLimiter,
+    configure_rate_limit,
+    get_env_bool,
+    parse_cookies,
+    parse_proxy,
+    parse_rate_limit,
+    rate_limiter,
+    resolve_rate_limit,
+    to_old_obj,
+)
 
 
 def test_cookies_parse():
@@ -117,3 +129,109 @@ def test_to_old_obj_tweet_new_schema():
     flat = to_old_obj(obj)
     assert flat["source"] == "<a>Twitter Web App</a>"
     assert flat["id"] == 9876
+
+
+# --- Rate limiting ---
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (5, 5.0),
+        ("5", 5.0),
+        ("5/s", 5.0),
+        ("5rps", 5.0),
+        ("5 req/s", 5.0),
+        (0, None),
+        ("off", None),
+        ("none", None),
+        ("", None),
+        (-1, None),
+        ("invalid", 5.0),
+        ("nan", 5.0),
+        ("inf", 5.0),
+    ],
+)
+def test_parse_rate_limit(value, expected):
+    assert parse_rate_limit(value) == expected
+
+
+def test_resolve_prefers_argument_over_environment(monkeypatch):
+    monkeypatch.setenv("TWS_RATE_LIMIT", "9")
+    assert resolve_rate_limit() == 9.0
+    assert resolve_rate_limit(2) == 2.0
+    monkeypatch.delenv("TWS_RATE_LIMIT")
+    assert resolve_rate_limit() == 5.0
+
+
+def test_configure_keeps_existing_rate_when_omitted():
+    old = rate_limiter.qps
+    try:
+        configure_rate_limit(None)
+        assert rate_limiter.qps == old
+        configure_rate_limit(3)
+        assert rate_limiter.qps == 3.0
+    finally:
+        rate_limiter.configure(old)
+
+
+async def test_limiter_spaces_concurrent_requests():
+    limiter = GlobalRateLimiter()
+    limiter.configure(40)
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    await asyncio.gather(*(limiter.acquire() for _ in range(4)))
+    assert loop.time() - start >= 0.06
+
+
+def test_limiter_can_be_reused_after_asyncio_run():
+    limiter = GlobalRateLimiter()
+    limiter.configure(100)
+    asyncio.run(limiter.acquire())
+    first = limiter._limiter
+    asyncio.run(limiter.acquire())
+    assert first is not limiter._limiter
+
+
+async def test_disabled_limiter_does_not_wait():
+    limiter = GlobalRateLimiter()
+    limiter.configure(None)
+    await asyncio.gather(*(limiter.acquire() for _ in range(100)))
+
+
+def test_environment_is_read_lazily(monkeypatch):
+    monkeypatch.delenv("TWS_RATE_LIMIT", raising=False)
+    monkeypatch.delenv("DOVEXSCRAPE_RATE_LIMIT", raising=False)
+    limiter = GlobalRateLimiter()
+
+    # setting the environment after importing twscrape still applies
+    assert limiter.qps == 5.0
+    monkeypatch.setenv("TWS_RATE_LIMIT", "3")
+    assert limiter.qps == 3.0
+    assert limiter.qps == 3.0
+
+    # legacy fallback and later changes are picked up until explicitly configured
+    monkeypatch.delenv("TWS_RATE_LIMIT")
+    monkeypatch.setenv("DOVEXSCRAPE_RATE_LIMIT", "7")
+    assert limiter.qps == 7.0
+    monkeypatch.setenv("TWS_RATE_LIMIT", "9")
+    assert limiter.qps == 9.0
+
+    limiter.configure(2)
+    monkeypatch.setenv("TWS_RATE_LIMIT", "11")
+    assert limiter.qps == 2.0
+
+
+def test_rate_limit_logs_effective_value_once(monkeypatch):
+    monkeypatch.delenv("TWS_RATE_LIMIT", raising=False)
+    monkeypatch.delenv("DOVEXSCRAPE_RATE_LIMIT", raising=False)
+    logs = []
+    from twscrape.logger import logger
+
+    monkeypatch.setattr(logger, "info", logs.append)
+
+    limiter = GlobalRateLimiter()
+    limiter.log_config()
+    limiter.log_config()
+
+    assert logs == ["Global rate limit: 5 req/s"]
