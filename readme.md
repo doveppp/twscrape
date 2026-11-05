@@ -126,6 +126,24 @@ api = API(raise_when_no_account=True, wait_timeout=30, wait_interval=1)
 
 Outgoing requests are limited process-wide to 5 requests/second. Set `rate_limit=10` on `API`, or `TWS_RATE_LIMIT` in the environment, to change it; `0` or `"off"` disables the limiter. The limiter applies to every account and queue in the process.
 
+Search, About, login and transaction-ID initialization share HTTP connection pools across clients and account rotations. Pools are scoped to an event loop, backend and proxy; curl also separates browser impersonation profiles. Cookies and headers remain private to each client. A pool can contain multiple TCP connections for different hosts or concurrent requests; reuse depends on server keep-alive and connection compatibility.
+
+The CLI closes shared pools automatically. In Python applications, stop all request tasks and close any active result generators before calling `close_http_pools()` in the same event loop, before it exits. Call this once at application shutdown, rather than after each API call:
+
+```python
+from twscrape.http import close_http_pools
+
+async def main():
+    api = API()
+    try:
+        print(await api.user_by_login("xdevelopers"))
+    finally:
+        try:
+            await api.pool.aclose()
+        finally:
+            await close_http_pools()
+```
+
 X sometimes sends a tweet without its author's profile. The tweet is still returned, with a placeholder `tweet.user` (the same goes for retweeted and quoted tweets): only `id` is known, plus `username` and sometimes `displayname` when the referencing tweet names the author. Its counts are 0, `created` is the Unix epoch and `profileImageUrl` is empty, which never happens for a real profile, so check `tweet.user.profileImageUrl == ""` before storing user stats.
 
 Search defaults to the Latest tab. Pass `kv={"product": "Top"}` or `kv={"product": "Media"}` to use another search product:

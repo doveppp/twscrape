@@ -11,7 +11,7 @@ from importlib.metadata import version
 from . import telemetry
 from .api import API, AccountsPool
 from .db import default_db
-from .http import Response
+from .http import Response, close_http_pools
 from .logger import logger, set_log_level
 from .login import LoginConfig
 from .models import Tweet, User, UserParseError
@@ -150,7 +150,10 @@ async def _run(args):
     try:
         await main(args)
     finally:
-        await telemetry.flush()
+        try:
+            await telemetry.flush()
+        finally:
+            await close_http_pools()
 
 
 def custom_help(p):

@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import os
 import random
@@ -140,27 +141,44 @@ class HttpClient(ABC):
     def headers(self) -> Any: ...
 
 
-# ponytail: one pool per proxy for the process. Client.aclose must not drop it.
-_shared_transports: dict[str | None, Any] = {}
+# Pools outlive account clients, but must never cross event loops or proxy routes.
+_shared_pools: dict[tuple[asyncio.AbstractEventLoop, str, str | None, str | None], Any] = {}
 
 
 def _shared_transport(proxy: str | None) -> Any:
-    transport = _shared_transports.get(proxy)
-    if transport is not None:
-        return transport
+    key = (asyncio.get_running_loop(), "httpx", proxy, None)
+    if key not in _shared_pools:
+        from httpx import AsyncHTTPTransport
 
-    from httpx import AsyncHTTPTransport
+        _shared_pools[key] = AsyncHTTPTransport(retries=3, proxy=proxy)
+    return _shared_pools[key]
 
-    class _Pool(AsyncHTTPTransport):
-        async def aclose(self) -> None:
-            return
 
-        async def __aexit__(self, *_: object) -> None:
-            return
+def _shared_curl(proxy: str | None, family: str) -> Any:
+    key = (asyncio.get_running_loop(), "curl", proxy, family)
+    if key not in _shared_pools:
+        from curl_cffi import AsyncCurl
 
-    transport = _Pool(retries=3, proxy=proxy)
-    _shared_transports[proxy] = transport
-    return transport
+        class _Pool(AsyncCurl):
+            async def close(self) -> None:
+                # Older curl-cffi sessions also close externally supplied AsyncCurl objects.
+                pass
+
+            async def aclose(self) -> None:
+                await super().close()
+
+        _shared_pools[key] = _Pool(loop=key[0])
+    return _shared_pools[key]
+
+
+async def close_http_pools() -> None:
+    """Close this event loop's pools after all HTTP clients and requests have finished."""
+    loop = asyncio.get_running_loop()
+    closing = []
+    for key in list(_shared_pools):
+        if key[0] is loop:
+            closing.append(_shared_pools.pop(key).aclose())
+    await asyncio.gather(*closing)
 
 
 class HttpxClient(HttpClient):
@@ -180,11 +198,17 @@ class HttpxClient(HttpClient):
         resolved_headers = dict(headers or {})
         ua_string, _ = _resolve_browser(resolved_headers.get("user-agent"), seed=seed)
         resolved_headers["user-agent"] = ua_string
-        # proxy lives on the transport. AsyncClient(proxy=) would mount a fresh pool
-        # and ignore the shared one.
+
+        class _Transport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                response = await _shared_transport(proxy).handle_async_request(request)
+                return cast(httpx.Response, response)
+
+        # Resolve the pool on first request, so clients can be constructed outside a loop.
+        # Proxy routing belongs to the shared transport, not AsyncClient's mounts.
         self._client = httpx.AsyncClient(
             follow_redirects=True,
-            transport=_shared_transport(proxy),
+            transport=_Transport(),
             headers=resolved_headers,
             cookies=cookies or {},
         )
@@ -224,7 +248,17 @@ class CurlClient(HttpClient):
         _, family = _resolve_browser((headers or {}).get("user-agent"))
         # strip user-agent — curl_cffi sets its own UA for the impersonated profile
         safe_headers = {k: v for k, v in (headers or {}).items() if k.lower() != "user-agent"}
-        self._session = AsyncSession(
+
+        class _Session(AsyncSession):
+            @property
+            def acurl(self):
+                if self._acurl is None:
+                    self._acurl = _shared_curl(proxy, family)
+                return self._acurl
+
+        # Session cookies, headers and easy handles stay private; the multi handle
+        # owns the shared connection cache, which survives individual session.close().
+        self._session = _Session(
             impersonate=cast(BrowserTypeLiteral, family),
             proxy=proxy,
             allow_redirects=True,

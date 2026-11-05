@@ -376,11 +376,12 @@ class QueueClient:
 
         if "text/html" in rep.headers.get("content-type", "") and rep.status_code >= 400:
             src = "Cloudflare" if "cf-ray" in rep.headers else "HTML"
-            msg = f"Blocked by {src}: {rep.status_code} - {req_id(rep)}"
+            retry_after = retry_after_seconds(rep)
+            msg = f"Blocked by {src}: {rep.status_code} - {req_id(rep)} - {retry_after}"
             logger.warning(msg)
             if rep.status_code == 429:
                 # Edge rate limit, not an account problem: back off and retry same account
-                raise BlockedError(msg, retry_after_seconds(rep))
+                raise BlockedError(msg, retry_after)
             raise AbortReqError(msg)
 
         try:

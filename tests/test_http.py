@@ -1,7 +1,10 @@
+import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+import pytest_asyncio
 from curl_cffi.const import CurlECode
 from curl_cffi.requests.errors import RequestsError
 
@@ -17,6 +20,9 @@ from twscrape.http import (
     Response,
     _detect_backend,
     _resolve_browser,
+    _shared_curl,
+    _shared_transport,
+    close_http_pools,
     format_error,
     make_client,
 )
@@ -467,28 +473,145 @@ def test_curl_client_strips_user_agent_from_session():
     assert "user-agent" not in {k.lower() for k in session_headers}
 
 
-def test_httpx_clients_share_transport_per_proxy():
-    direct_a = HttpxClient()
-    direct_b = HttpxClient()
-    proxy_a = HttpxClient(proxy="http://127.0.0.1:1")
-    proxy_b = HttpxClient(proxy="http://127.0.0.1:1")
-    other = HttpxClient(proxy="http://127.0.0.1:2")
-
-    assert direct_a._client._transport is direct_b._client._transport
-    assert proxy_a._client._transport is proxy_b._client._transport
-    assert direct_a._client._transport is not proxy_a._client._transport
-    assert proxy_a._client._transport is not other._client._transport
+@pytest_asyncio.fixture(autouse=True, loop_scope="function")
+async def cleanup_http_pools():
+    try:
+        yield
+    finally:
+        await close_http_pools()
 
 
-async def test_closing_httpx_client_keeps_shared_pool():
-    client = HttpxClient()
-    other = HttpxClient()
-    pool = client._client._transport._pool
-    pool._connections.append("sentinel")
-    await client.aclose()
-    assert other._client._transport._pool is pool
-    assert pool._connections == ["sentinel"]
-    pool._connections.clear()
+@pytest_asyncio.fixture(loop_scope="function")
+async def keepalive_server():
+    writers, tasks = set(), set()
+    accepted = []
+
+    async def handle(reader, writer):
+        task = asyncio.current_task()
+        tasks.add(task)
+        writers.add(writer)
+        accepted.append(writer.get_extra_info("peername"))
+        connection = len(accepted)
+        try:
+            while True:
+                data = await reader.readuntil(b"\r\n\r\n")
+                lines = data.decode().split("\r\n")
+                path = lines[0].split()[1]
+                headers = dict(x.split(": ", 1) for x in lines[1:] if x)
+                headers = {k.lower(): v for k, v in headers.items()}
+                body = json.dumps({"connection": connection, "headers": headers}).encode()
+                status = "302 Found" if path == "/redirect" else "200 OK"
+                extra = "Location: /echo\r\n" if path == "/redirect" else ""
+                extra += f"Set-Cookie: seen={headers.get('x-account', '')}; Path=/\r\n"
+                writer.write(
+                    f"HTTP/1.1 {status}\r\nContent-Length: {len(body)}\r\n"
+                    f"Content-Type: application/json\r\n{extra}\r\n".encode()
+                    + body
+                )
+                await writer.drain()
+        except (asyncio.IncompleteReadError, ConnectionError):
+            pass
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            writers.discard(writer)
+            tasks.discard(task)
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        yield f"http://127.0.0.1:{port}", accepted
+    finally:
+        server.close()
+        await server.wait_closed()
+        await close_http_pools()
+        for writer in list(writers):
+            writer.close()
+        await asyncio.gather(*list(tasks))
+
+
+@pytest.mark.parametrize("backend", ["httpx", "curl"])
+async def test_clients_reuse_tcp_connections_and_isolate_account_state(backend, keepalive_server):
+    url, accepted = keepalive_server
+
+    def client(account):
+        return make_client(
+            backend,
+            headers={"x-account": account, "authorization": f"Bearer {account}"},
+            cookies={"auth_token": account},
+        )
+
+    async with client("alice") as alice:
+        first = (await alice.get(f"{url}/redirect")).json()
+        assert "seen=alice" in first["headers"]["cookie"]
+    assert len(accepted) == 1
+
+    async with client("bob") as bob, client("carol") as carol:
+        second = (await bob.get(f"{url}/echo")).json()
+        assert second["connection"] == first["connection"]
+        assert second["headers"]["cookie"] == "auth_token=bob"
+        assert second["headers"]["authorization"] == "Bearer bob"
+
+        responses = await asyncio.gather(bob.get(f"{url}/echo"), carol.get(f"{url}/echo"))
+        for response, account in zip(responses, ("bob", "carol"), strict=True):
+            headers = response.json()["headers"]
+            assert headers["x-account"] == account
+            assert headers["authorization"] == f"Bearer {account}"
+            assert f"auth_token={account}" in headers["cookie"]
+            assert "alice" not in headers["cookie"]
+        assert bob.cookies.get("seen") == "bob"
+        assert carol.cookies.get("seen") == "carol"
+        await bob.aclose()
+        assert (await carol.get(f"{url}/echo")).status_code == 200
+
+    # Closing all account clients preserves the pool for the next API call.
+    count = len(accepted)
+    async with client("dave") as dave:
+        assert (await dave.get(f"{url}/echo")).json()["connection"] <= count
+    assert len(accepted) == count
+
+    pool = _shared_transport(None) if backend == "httpx" else _shared_curl(None, "chrome")
+    await close_http_pools()
+    await close_http_pools()  # idempotent
+    if backend == "httpx":
+        assert pool._pool.connections == []
+    else:
+        assert pool._curlm is None
+    async with client("eve") as eve:
+        assert (await eve.get(f"{url}/echo")).json()["connection"] == count + 1
+
+
+async def test_shared_pools_separate_proxy_routes_and_curl_profiles():
+    direct = _shared_transport(None)
+    proxy = _shared_transport("http://127.0.0.1:1")
+    assert _shared_transport(None) is direct
+    assert _shared_transport("http://127.0.0.1:1") is proxy
+    assert direct is not proxy
+    assert _shared_transport("http://127.0.0.1:2") is not proxy
+
+    curl = _shared_curl(None, "chrome")
+    assert _shared_curl(None, "chrome") is curl
+    assert _shared_curl("http://127.0.0.1:1", "chrome") is not curl
+    assert _shared_curl(None, "safari") is not curl
+
+
+def test_shared_pools_and_cleanup_are_isolated_between_event_loops():
+    async def pools():
+        return _shared_transport(None), _shared_curl(None, "chrome")
+
+    loops = [asyncio.new_event_loop(), asyncio.new_event_loop()]
+    try:
+        first = loops[0].run_until_complete(pools())
+        second = loops[1].run_until_complete(pools())
+        assert all(a is not b for a, b in zip(first, second, strict=True))
+        loops[0].run_until_complete(close_http_pools())
+        assert first[1]._curlm is None
+        assert second[1]._curlm is not None
+        assert loops[1].run_until_complete(pools()) == second
+    finally:
+        for loop in loops:
+            loop.run_until_complete(close_http_pools())
+            loop.close()
 
 
 def test_httpx_client_resolves_ua_hint_to_real_string():
