@@ -24,13 +24,10 @@ class XClIdParseError(XClIdError): ...
 
 
 def _make_client(proxy: str | None = None, cookies: dict[str, str] | None = None) -> HttpClient:
-    client = _make_http_client(headers={"user-agent": "@chrome"}, proxy=proxy)
-    for name, value in (cookies or {}).items():
-        client.cookies.set(name, value, domain=".x.com")
-    return client
+    return _make_http_client(headers={"user-agent": "@chrome"}, proxy=proxy, cookies=cookies)
 
 
-async def get_tw_page_text(url: str, clt: HttpClient):
+async def get_tw_page_text(url: str, clt: HttpClient) -> str:
     rep = await clt.get(url)
 
     rep.raise_for_status()
@@ -246,7 +243,7 @@ def cacl_anim_key(frames: list[float], target_time: float) -> str:
 
 def parse_vk_bytes(soup: bs4.BeautifulSoup) -> list[int]:
     el = soup.find("meta", {"name": "twitter-site-verification", "content": True})
-    el = str(el.get("content")) if el and isinstance(el, bs4.Tag) else None
+    el = str(el.get("content")) if isinstance(el, bs4.Tag) else None
     if not el:
         raise XClIdParseError("X verification key not found")
 

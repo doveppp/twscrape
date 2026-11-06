@@ -622,6 +622,7 @@ async def main(argv: list[str] | None = None) -> int:
         if (not only or n in only) and (only or is_stale(n, ops[f"{n}_raw"], meta, ttl))
     ]
 
+    ok, fail = 0, 0
     if not to_update:
         print("\nAll files are up to date.")
     else:
@@ -629,7 +630,6 @@ async def main(argv: list[str] | None = None) -> int:
         pool = AccountsPool()
         api = API(pool, debug=True)
 
-        ok, fail = 0, 0
         for name, method, fn in to_update:
             outfile = f"{OUT}/raw_{name}.json"
             try:
@@ -657,11 +657,12 @@ async def main(argv: list[str] | None = None) -> int:
         skipped = len(COMMANDS) - len(to_update)
         print(f"\n{ok} updated, {skipped} skipped, {fail} failed")
 
-        if fail:
-            return 1
+    # failed fetches leave their fixtures untouched, so still validate and prune the rest
     if args.command == "refresh" and validate_fixtures() != 0:
         return 1
-    return prune_unchanged_fixtures() if args.command == "refresh" else 0
+    if args.command == "refresh" and prune_unchanged_fixtures() != 0:
+        return 1
+    return 1 if fail else 0
 
 
 if __name__ == "__main__":

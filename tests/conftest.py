@@ -7,7 +7,7 @@ import asyncmy
 import pytest
 import pytest_asyncio
 
-from twscrape import telemetry
+from twscrape import http, telemetry
 from twscrape.account import Account
 from twscrape.accounts_pool import AccountsPool
 from twscrape.api import API
@@ -76,6 +76,11 @@ def db_dsn():
 @pytest.fixture(autouse=True)
 def reset_telemetry():
     telemetry.reset()
+
+
+@pytest.fixture(autouse=True)
+def no_retry_delay(monkeypatch):
+    monkeypatch.setattr(http, "_CURL_RETRY_DELAY", 0)
 
 
 @pytest.fixture(autouse=True)

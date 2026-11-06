@@ -423,7 +423,11 @@ class Tweet(JSONTrait):
     media: "Media"
     viewCount: int | None = None
     retweetedTweet: Optional["Tweet"] = None
+    retweetedTweetId: int | None = None
+    retweetedTweetIdStr: str | None = None
     quotedTweet: Optional["Tweet"] = None
+    quotedTweetId: int | None = None
+    quotedTweetIdStr: str | None = None
     place: Place | None = None
     coordinates: Coordinates | None = None
     inReplyToTweetId: int | None = None
@@ -464,8 +468,11 @@ class Tweet(JSONTrait):
         # author: flat user used when the tweet's own author has no profile in the response
         tw_usr = User.parse(_get_tweet_user_obj(obj, res, author))
 
-        rt_obj = get_or(res, f"tweets.{_first(obj, RT_ID_PATH)}")
-        qt_obj = get_or(res, f"tweets.{_first(obj, QT_ID_PATH)}")
+        # kept even when the nested tweet is absent from the response
+        rt_id = _first(obj, RT_ID_PATH)
+        qt_id = _first(obj, QT_ID_PATH)
+        rt_obj = get_or(res, f"tweets.{rt_id}")
+        qt_obj = get_or(res, f"tweets.{qt_id}")
 
         # x.com/i/status/{id} serves any tweet, for a placeholder author without username
         url = f"https://x.com/{tw_usr.username or 'i'}/status/{obj['id_str']}"
@@ -494,9 +501,13 @@ class Tweet(JSONTrait):
             retweetedTweet=Tweet.parse(rt_obj, res, _referenced_author(obj, rt_obj))
             if rt_obj
             else None,
+            retweetedTweetId=int(rt_id) if rt_id is not None else None,
+            retweetedTweetIdStr=rt_id,
             quotedTweet=Tweet.parse(qt_obj, res, _referenced_author(obj, qt_obj))
             if qt_obj
             else None,
+            quotedTweetId=int(qt_id) if qt_id is not None else None,
+            quotedTweetIdStr=qt_id,
             place=Place.parse(obj["place"]) if obj.get("place") else None,
             coordinates=Coordinates.parse(obj),
             inReplyToTweetId=int_or(obj, "in_reply_to_status_id_str"),
@@ -519,7 +530,7 @@ class Tweet(JSONTrait):
 
         # issue #42 – restore full rt text
         rt = doc.retweetedTweet
-        if rt is not None and rt.user is not None and doc.rawContent.endswith("…"):
+        if rt is not None and doc.rawContent.endswith("…"):
             rt_msg = f"RT @{rt.user.username}: {rt.rawContent}"
             if doc.rawContent != rt_msg:
                 doc.rawContent = rt_msg
@@ -819,11 +830,18 @@ def _parse_card_get_str(values: list[dict], key: str, defaultVal: str | None = N
 Num = TypeVar("Num", int, float)
 
 
-def _parse_card_get_num(values: list[dict], key: str, fn: Callable[[str], Num]) -> Num | None:
+def _parse_card_get_num(
+    values: list[dict], key: str, fn: Callable[[str], Num], url: str
+) -> Num | None:
+    val = _parse_card_get_str(values, key)
+    if val is None:
+        return None
+
+    # a format not seen yet must not drop the tweet, but must be seen to be parsed later
     try:
-        val = _parse_card_get_str(values, key)
-        return fn(val) if val is not None else None
+        return fn(val)
     except ValueError:
+        logger.warning(f"Unparsable card value {key}={val!r} on {url}")
         return None
 
 
@@ -882,14 +900,14 @@ def _parse_card(obj: dict, url: str):
         title, val = _parse_card_extract_title(val)
         description, val = _parse_card_extract_str(val, "description")
         vanity_url, val = _parse_card_extract_str(val, "vanity_url")
-        url, val = _parse_card_extract_str(val, "card_url")
+        card_url, val = _parse_card_extract_str(val, "card_url")
         photo, val = _parse_card_extract_largest_photo(val)
 
         return SummaryCard(
             title=title,
             description=description,
             vanityUrl=vanity_url,
-            url=url,
+            url=card_url,
             photo=photo,
         )
 
@@ -909,7 +927,7 @@ def _parse_card(obj: dict, url: str):
         title = get_or(co, "details_1.data.title.content", "")
         description = get_or(co, "details_1.data.subtitle.content", "")
         vanity_url = get_or(do, "browser_with_docked_media_1.data.url_data.vanity", "")
-        url = get_or(do, "browser_with_docked_media_1.data.url_data.url", "")
+        card_url = get_or(do, "browser_with_docked_media_1.data.url_data.url", "")
         video = MediaVideo.parse(me) if me and me["type"] == "video" else None
         photo = MediaPhoto.parse(me) if me and me["type"] == "photo" else None
 
@@ -917,7 +935,7 @@ def _parse_card(obj: dict, url: str):
             title=title,
             description=description,
             vanityUrl=vanity_url,
-            url=url,
+            url=card_url,
             photo=photo,
             video=video,
         )
@@ -947,7 +965,7 @@ def _parse_card(obj: dict, url: str):
             options=options,
             finished=finished,
             videoUrl=_parse_card_get_str(val, "player_hls_url"),
-            durationSeconds=_parse_card_get_num(val, "content_duration_seconds", int),
+            durationSeconds=_parse_card_get_num(val, "content_duration_seconds", int, url),
             photo=photo,
         )
 
@@ -1048,7 +1066,7 @@ def _parse_card(obj: dict, url: str):
             thankYouText=thank_you_text,
             thankYouUrl=thank_you_url,
             videoUrl=_parse_card_get_str(val, "player_stream_url"),
-            durationSeconds=_parse_card_get_num(val, "content_duration_seconds", int),
+            durationSeconds=_parse_card_get_num(val, "content_duration_seconds", int, url),
             ctas=ctas,
             photo=_parse_card_get_photo(val, "player_image_original"),
         )
@@ -1061,14 +1079,15 @@ def _parse_card(obj: dict, url: str):
             return None
 
         # app_num_ratings is locale-formatted ("289,838"), but can be abbreviated ("1.2K")
-        num_ratings = _parse_card_get_str(val, "app_num_ratings") or ""
-        num_ratings = re.sub(r"[\s,.'\u00a0]", "", num_ratings)
+        def num_ratings(x: str):
+            return int(re.sub(r"[\s,.'\u00a0]", "", x))
+
         return AppCard(
             title=card_title,
             url=card_url,
             description=_parse_card_get_str(val, "description"),
-            starRating=_parse_card_get_num(val, "app_star_rating", float),
-            numRatings=int(num_ratings) if num_ratings.isdecimal() else None,
+            starRating=_parse_card_get_num(val, "app_star_rating", float, url),
+            numRatings=_parse_card_get_num(val, "app_num_ratings", num_ratings, url),
             photo=_parse_card_get_photo(val, "thumbnail_original"),
         )
 
@@ -1274,8 +1293,8 @@ def _parse_items(
     # check for dict, because Response can be mocked in tests with different type
     res = rep if isinstance(rep, dict) else rep.json()
     obj = to_old_rep(res)
-    retweeted_ids: set[str] = obj.get("retweeted_ids", set())
-    quoted_ids: set[str] = obj.get("quoted_ids", set())
+    retweeted_ids = cast(set[str], obj.get("retweeted_ids", set()))
+    quoted_ids = cast(set[str], obj.get("quoted_ids", set()))
 
     ids = seen_ids if seen_ids is not None else set()
     for x in obj[key].values():

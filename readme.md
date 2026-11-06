@@ -28,13 +28,9 @@ Accounts are stored in MySQL 8.0.19+ (tested with MySQL 8.4). Create a database 
 export TWS_DB='mysql://user:password@127.0.0.1:3306/twscrape'
 ```
 
-The user needs permission to create the `accounts` and `_meta` tables on first run. URL-encode special characters in the username or password. `httpx` is the default HTTP backend. For browser-like TLS fingerprinting, install the optional `curl-cffi` backend:
+The user needs permission to create the `accounts` and `_meta` tables on first run. URL-encode special characters in the username or password.
 
-```bash
-pip install "twscrape[curl]"
-
-TWS_HTTP_BACKEND=curl twscrape user_by_login xdevelopers
-```
+twscrape uses [curl-cffi](https://github.com/lexiforest/curl_cffi) by default, with a browser-like TLS fingerprint that Cloudflare requires on some operations, for example `user_by_id`. If something breaks, `TWS_HTTP_BACKEND=httpx` switches back to `httpx`.
 
 ## Features
 
@@ -49,16 +45,16 @@ TWS_HTTP_BACKEND=curl twscrape user_by_login xdevelopers
 ## Sponsor
 
 <p align="center">
-  <a href="https://www.rapidproxy.io/?ref=twscrape">
-    <img src=".github/rapidproxy.jpg" alt="RapidProxy logo" width="460">
+  <a href="https://proxy-seller.com/?utm_source=github&utm_medium=referral&utm_campaign=partner_promo&utm_term=github&partner=A5588ADD6A634EF3">
+    <img src=".github/proxyseller.png" alt="Proxy-Seller banner" width="600">
   </a>
 </p>
 
 <p align="center">
-  <a href="https://www.rapidproxy.io/?ref=twscrape"><strong>RapidProxy</strong></a> is a residential proxy platform with 90M+ real IPs across 200+ countries. It supports rotation, geo-targeting, and high concurrency to improve scraping success and reduce bans. Start your free trial today!
+  <a href="https://proxy-seller.com/?utm_source=github&utm_medium=referral&utm_campaign=partner_promo&utm_term=github&partner=A5588ADD6A634EF3"><strong>Proxy-Seller</strong></a> provides residential, ISP, IPv4 and IPv6 proxies in 220+ locations, from $0.70 per GB, with 24/7 support.
 </p>
 
-<p align="center">Discount Code: <code>RAPID10</code> to get 10% off.</p>
+<p align="center">Promo code <code>TWSCRAPE</code> gives 15% off ISP, IPv4 and residential proxies.</p>
 
 ## Start With Cookies
 
@@ -80,7 +76,7 @@ twscrape add_cookie my_account
 
 Cookie accounts that include `auth_token` and `ct0` are activated immediately; no `login_accounts` step is needed.
 
-Ready-to-use cookie accounts are available from [this provider](https://kutt.to/ueeM5f). Proxy users can bring their own proxies or use [this provider](https://kutt.to/eb3rXk). These are referral links.
+Ready-to-use cookie accounts are available from [this provider](https://kutt.to/ueeM5f). Proxy users can bring their own proxies or use [Proxy-Seller](https://proxy-seller.com/?utm_source=github&utm_medium=referral&utm_campaign=partner_promo&utm_term=github&partner=A5588ADD6A634EF3). These are referral links.
 
 X/Twitter's Terms of Service discourage using multiple accounts. Use this project responsibly and at your own discretion.
 
@@ -443,7 +439,7 @@ Do not set `api.proxy` or `TWS_PROXY` when you want per-account proxies to be us
 - `TWS_PROXY` - global proxy for all accounts
 - `TWS_WAIT_EMAIL_CODE` - email verification timeout in seconds, default `30`
 - `TWS_RAISE_WHEN_NO_ACCOUNT` - raise `NoAccountError` instead of waiting; accepts `false`, `0`, `true`, `1`
-- `TWS_HTTP_BACKEND` - `httpx` or `curl`
+- `TWS_HTTP_BACKEND` - `curl` (default) or `httpx`
 - `TWS_LOG_LEVEL` - logger level, default `INFO`
 - `TWS_TELEMETRY=0` - disable anonymous telemetry
 
@@ -467,3 +463,7 @@ twscrape collects anonymous, aggregated telemetry about used GraphQL operation n
 - [twitter-advanced-search](https://github.com/igorbrigadir/twitter-advanced-search) - guide on search filters
 - [TweeterPy](https://github.com/iSarabjitDhiman/TweeterPy) - another X client
 - [twitter-api-client](https://github.com/trevorhobenshield/twitter-api-client) - implementation of Twitter's v1, v2, and GraphQL APIs
+
+## Contributing
+
+Pull requests are welcome, including ones made with agents: point yours at [agents.md](https://github.com/vladkens/twscrape/blob/main/agents.md).

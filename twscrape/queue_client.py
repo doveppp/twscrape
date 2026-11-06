@@ -241,7 +241,7 @@ def dump_rep(rep: Response):
 
     msg = []
     msg.append(f"{count:,d} - {req_id(rep)}")
-    msg.append(f"{rep.status_code} {rep.request.method} {rep.request.url}")
+    msg.append(f"{rep.status_code} {rep.request.method if rep.request else '?'} {rep.url}")
     msg.append("\n")
     # msg.append("\n".join([str(x) for x in list(rep.request.headers.items())]))
     msg.append("\n".join([str(x) for x in list(rep.headers.items())]))
@@ -378,6 +378,11 @@ class QueueClient:
             src = "Cloudflare" if "cf-ray" in rep.headers else "HTML"
             retry_after = retry_after_seconds(rep)
             msg = f"Blocked by {src}: {rep.status_code} - {req_id(rep)} - {retry_after}"
+            # Cloudflare blocks the httpx TLS fingerprint on some ops (UserByRestId), see #337
+            backend = getattr(self.ctx.clt, "backend", None) if self.ctx else None
+            if src == "Cloudflare" and backend == "httpx":
+                msg += "; retry with TWS_HTTP_BACKEND=curl or unset it"
+
             logger.warning(msg)
             if rep.status_code == 429:
                 # Edge rate limit, not an account problem: back off and retry same account
