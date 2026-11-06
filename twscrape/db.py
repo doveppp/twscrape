@@ -83,7 +83,18 @@ async def _migration_v2(cur):
             await cur.execute(f"ALTER TABLE accounts ADD COLUMN {name} {definition}")
 
 
-MIGRATIONS = [_migration_v1, _migration_v2]
+async def _migration_v3(cur):
+    """Add SearchTimeline eligibility. NULL means unprobed and stays eligible."""
+    await cur.execute(
+        "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'accounts'"
+    )
+    existing = {x["COLUMN_NAME"] for x in await cur.fetchall()}
+    if "can_search" not in existing:
+        await cur.execute("ALTER TABLE accounts ADD COLUMN can_search TINYINT DEFAULT NULL")
+
+
+MIGRATIONS = [_migration_v1, _migration_v2, _migration_v3]
 
 
 async def migrate(pool: Pool) -> None:

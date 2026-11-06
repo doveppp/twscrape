@@ -318,6 +318,41 @@ async def test_next_available_at_returns_future_time(pool_mock: AccountsPool):
     assert result != "now"
 
 
+async def test_can_search_tristate_roundtrip(pool_mock: AccountsPool):
+    await pool_mock.add_account("user1", "pass", "email", "ep")
+    assert (await pool_mock.get("user1")).can_search is None
+
+    for value in (False, True, None):
+        await pool_mock.set_can_search("user1", value)
+        assert (await pool_mock.get("user1")).can_search is value
+
+
+async def test_can_search_false_excluded_only_from_search_timeline(pool_mock: AccountsPool):
+    await pool_mock.add_account_cookies("user1", "auth_token=t; ct0=c")
+    await pool_mock.set_can_search("user1", False)
+
+    assert await pool_mock.get_for_queue("SearchTimeline") is None
+    assert await pool_mock.next_available_at("SearchTimeline") is None
+
+    account = await pool_mock.get_for_queue("UserTweets")
+    assert account is not None
+    assert account.username == "user1"
+
+
+async def test_can_search_none_and_true_are_search_eligible(pool_mock: AccountsPool):
+    await pool_mock.add_account_cookies("user1", "auth_token=t1; ct0=c1")
+    await pool_mock.add_account_cookies("user2", "auth_token=t2; ct0=c2")
+    await pool_mock.set_can_search("user1", True)
+
+    seen = set()
+    # Leave each claim held so the next acquisition must pick the other account.
+    for _ in range(2):
+        account = await pool_mock.get_for_queue("SearchTimeline")
+        assert account is not None
+        seen.add(account.username)
+    assert seen == {"user1", "user2"}
+
+
 async def test_get_for_queue_or_wait_raises_when_flag_set(pool_mock: AccountsPool):
     pool = AccountsPool(pool_mock._db_file, raise_when_no_account=True)
     with pytest.raises(NoAccountError):
@@ -375,6 +410,21 @@ async def test_get_for_queue_or_wait_does_not_wait_without_active_accounts(
     assert await pool.get_for_queue_or_wait("TestQueue") is None
 
 
+async def test_get_for_queue_or_wait_does_not_wait_when_all_search_blocked(
+    pool_mock: AccountsPool, monkeypatch
+):
+    pool = AccountsPool(pool_mock._db_file, wait_timeout=1)
+    await pool.add_account_cookies("user1", "auth_token=t; ct0=c")
+    await pool.set_can_search("user1", False)
+
+    async def fail_if_called(_):
+        pytest.fail("should not wait when every account is blocked for search")
+
+    monkeypatch.setattr("twscrape.accounts_pool.asyncio.sleep", fail_if_called)
+
+    assert await pool.get_for_queue_or_wait("SearchTimeline") is None
+
+
 async def test_api_passes_wait_config_to_new_pool(db_dsn):
     api = API(db_dsn, wait_timeout=1, wait_interval=0.1)
     try:
@@ -394,6 +444,17 @@ async def test_accounts_info_active_first(pool_mock: AccountsPool):
     assert items[0]["active"] is True
     assert items[1]["username"] == "user_b"
     assert items[1]["active"] is False
+
+
+async def test_accounts_info_exposes_can_search(pool_mock: AccountsPool):
+    await pool_mock.add_account("user1", "pass", "email", "ep")
+    assert (await pool_mock.accounts_info())[0]["can_search"] is None
+
+    await pool_mock.set_can_search("user1", False)
+    assert (await pool_mock.accounts_info())[0]["can_search"] is False
+
+    await pool_mock.set_can_search("user1", True)
+    assert (await pool_mock.accounts_info())[0]["can_search"] is True
 
 
 async def test_load_from_file(pool_mock: AccountsPool, tmp_path):
@@ -552,6 +613,32 @@ async def test_migration_adds_health_columns_without_losing_rows(db_dsn):
         assert account.unknown_fail_count == 0
     finally:
         await migrated.aclose()
+
+
+async def test_migration_v3_adds_nullable_can_search_without_losing_rows(db_dsn):
+    pool = AccountsPool(db_dsn)
+    try:
+        await pool.add_account_cookies("user1", "auth_token=t; ct0=c")
+        await pool._db.execute("ALTER TABLE accounts DROP COLUMN can_search")
+        await pool._db.execute("UPDATE _meta SET `value` = '2' WHERE `key` = 'user_version'")
+    finally:
+        await pool.aclose()
+
+    migrated = AccountsPool(db_dsn)
+    try:
+        account = await migrated.get("user1")
+        assert account.cookies == {"auth_token": "t", "ct0": "c"}
+        assert account.can_search is None
+        # re-running v3 against the existing column is a no-op
+        await migrated._db.execute("UPDATE _meta SET `value` = '2' WHERE `key` = 'user_version'")
+    finally:
+        await migrated.aclose()
+
+    again = AccountsPool(db_dsn)
+    try:
+        assert (await again.get("user1")).can_search is None
+    finally:
+        await again.aclose()
 
 
 async def test_concurrent_acquire_release_does_not_deadlock(pool_mock: AccountsPool):

@@ -130,6 +130,10 @@ async def _dispatch(args, pool, api):
         await pool.reactivate(args.usernames)
         return
 
+    if args.command == "check_search":
+        print(json.dumps(await api.check_search(args.username)))
+        return
+
     fn = args.command + "_raw" if args.raw else args.command
     fn = getattr(api, fn, None)
     if fn is None:
@@ -229,6 +233,11 @@ def run():
 
     reactivate = subparsers.add_parser("reactivate", help="Mark accounts with a session active")
     reactivate.add_argument("usernames", nargs="+", default=[], help="Usernames to reactivate")
+
+    check_search = subparsers.add_parser(
+        "check_search", help="Probe one account and update can_search"
+    )
+    check_search.add_argument("username", help="Local account identifier to probe")
 
     c_lim("search", "Search for tweets", "query", "Search query")
     c_one("tweet_details", "Get tweet details", "tweet_id", "Tweet ID", int)

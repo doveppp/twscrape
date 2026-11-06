@@ -73,6 +73,31 @@ GQL_GEN = [
 ]
 
 
+async def test_check_search_persists_result_without_changing_account_health(api_http):
+    api, mock = api_http
+    await api.pool.set_can_search("user1", False)
+    await api.pool._db.execute(
+        "UPDATE accounts SET _tx = 'existing-lease', xclid_fail_count = 2, "
+        "global_locked_until = '2099-01-01 00:00:00' WHERE username = 'user1'"
+    )
+    before = (await api.pool.get("user1")).to_rs()
+    mock.add_response(json=load("raw_search"))
+
+    result = await api.check_search("user1")
+
+    assert result["can_search"] is True
+    assert result["updated"] is True
+    before["can_search"] = True
+    assert (await api.pool.get("user1")).to_rs() == before
+
+    mock.add_response(status_code=429)
+    result = await api.check_search("user1")
+
+    assert result["can_search"] is None
+    assert result["updated"] is False
+    assert (await api.pool.get("user1")).to_rs() == before
+
+
 async def test_gql_params(api_mock: API, monkeypatch):
     for func in GQL_GEN:
         args = []

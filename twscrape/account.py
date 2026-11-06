@@ -47,6 +47,7 @@ class Account(JSONTrait):
     xclid_fail_count: int = 0  # consecutive x-client-transaction-id 404 retries exhausted
     unknown_fail_count: int = 0  # consecutive unknown request errors
     global_locked_until: datetime | None = None  # frozen for every queue until this time
+    can_search: bool | None = None  # False = confirmed blocked on SearchTimeline; NULL = unprobed
 
     @property
     def has_session(self) -> bool:
@@ -69,6 +70,8 @@ class Account(JSONTrait):
             doc[name] = _parse_dt(doc.get(name))
         for name in ("xclid_fail_count", "unknown_fail_count"):
             doc[name] = int(doc.get(name) or 0)
+        value = doc.get("can_search")
+        doc["can_search"] = None if value is None else bool(value)
         return Account(**doc)
 
     def to_rs(self):

@@ -11,6 +11,30 @@ from twscrape import ApiError, UserParseError, XClIdParseError, cli
 DUMMY_DSN = "mysql://u:p@127.0.0.1:3306/test"
 
 
+@pytest.mark.parametrize("value", [True, False, None])
+def test_check_search_command(monkeypatch, capsys, value):
+    called = []
+    result = {
+        "username": "user1",
+        "can_search": value,
+        "updated": value is not None,
+        "reason": "test_result",
+    }
+
+    async def check_search(self, username):
+        called.append(username)
+        return result
+
+    monkeypatch.setattr(cli.API, "check_search", check_search)
+    monkeypatch.setenv("TWS_TELEMETRY", "0")
+    monkeypatch.setattr(cli.sys, "argv", ["twscrape", "--db", DUMMY_DSN, "check_search", "user1"])
+
+    cli.run()
+
+    assert called == ["user1"]
+    assert json.loads(capsys.readouterr().out) == result
+
+
 def test_reactivate_command(db_dsn, monkeypatch):
     async def add_inactive_accounts():
         pool = cli.AccountsPool(db_dsn)

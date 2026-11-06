@@ -24,6 +24,7 @@ class AccountInfo(TypedDict):
     last_used: datetime | None
     total_req: int
     error_msg: str | None
+    can_search: bool | None
 
 
 # kind -> accounts column holding the consecutive failure count
@@ -78,6 +79,13 @@ class AccountsPool:
     def _usernames_where(usernames: list[str]) -> tuple[str, dict[str, str]]:
         params = {f"username_{i}": x for i, x in enumerate(dict.fromkeys(usernames))}
         return ",".join(f"%({x})s" for x in params), params
+
+    @staticmethod
+    def _queue_filter(queue: str) -> str:
+        """Fixed queue eligibility. Only SearchTimeline drops a confirmed False."""
+        if queue == "SearchTimeline":
+            return "AND (can_search IS NULL OR can_search = 1)"
+        return ""
 
     async def load_from_file(self, filepath: str, line_format: str):
         line_delim = guess_delim(line_format)
@@ -292,6 +300,11 @@ class AccountsPool:
         qs = "UPDATE accounts SET active = %(active)s WHERE username = %(username)s"
         await self._db.execute(qs, {"username": username, "active": 1 if active else 0})
 
+    async def set_can_search(self, username: str, can_search: bool | None):
+        qs = "UPDATE accounts SET can_search = %(can_search)s WHERE username = %(username)s"
+        value = None if can_search is None else (1 if can_search else 0)
+        await self._db.execute(qs, {"username": username, "can_search": value})
+
     async def incr_fail_count(self, username: str, kind: str) -> int:
         """Bump a consecutive-failure counter and return the new value.
 
@@ -380,6 +393,7 @@ class AccountsPool:
 
     async def get_for_queue(self, queue: str) -> Account | None:
         path = self._json_path(queue)
+        queue_filter = self._queue_filter(queue)
         pool = await self._db.pool()
 
         async with pool.acquire() as conn, conn.cursor() as cur:
@@ -396,6 +410,7 @@ class AccountsPool:
                            AS DATETIME) < NOW())
                   AND (global_locked_until IS NULL OR global_locked_until < NOW())
                   AND (_tx IS NULL OR last_used < DATE_SUB(NOW(), INTERVAL 15 MINUTE))
+                  {queue_filter}
                 ORDER BY {self._order_by}
                 LIMIT 50
                 """,
@@ -406,7 +421,7 @@ class AccountsPool:
             for candidate in candidates:
                 tx = uuid.uuid4().hex
                 await cur.execute(
-                    """
+                    f"""
                     UPDATE accounts SET
                         locks = JSON_SET(locks, %(path)s,
                             DATE_ADD(NOW(), INTERVAL 15 MINUTE)),
@@ -419,6 +434,7 @@ class AccountsPool:
                                AS DATETIME) < NOW())
                       AND (global_locked_until IS NULL OR global_locked_until < NOW())
                       AND (_tx IS NULL OR last_used < DATE_SUB(NOW(), INTERVAL 15 MINUTE))
+                      {queue_filter}
                     """,
                     {"path": path, "tx": tx, "username": candidate["username"]},
                 )
@@ -455,21 +471,22 @@ class AccountsPool:
                 or get_env_bool("DOVEXSCRAPE_RAISE_WHEN_NO_ACCOUNT")
             )
 
-            # next_available_at returns None only when no active account exists at all,
-            # in which case waiting is futile. A timestamp means active accounts exist
-            # but are all locked right now (in-use or rate-limited).
+            # next_available_at returns None when no account is eligible for this
+            # queue (none active, or every active account is blocked for it, e.g.
+            # can_search=0 on SearchTimeline), in which case waiting is futile. A
+            # timestamp means eligible accounts exist but are all locked right now.
             nat = await self.next_available_at(queue)
-            no_active = not nat
+            no_eligible = not nat
 
-            # Give up (raise / stop) when: no active account exists, the caller opted
-            # out of waiting (wait_timeout is None), or the wait budget is exhausted.
+            # Give up (raise / stop) when: no eligible account exists, the caller
+            # opted out of waiting (wait_timeout is None), or the budget is spent.
             elapsed = (utc.now() - start).total_seconds()
-            give_up = no_active or self._wait_timeout is None or elapsed >= self._wait_timeout
+            give_up = no_eligible or self._wait_timeout is None or elapsed >= self._wait_timeout
             if give_up:
                 if raise_no_account:
                     raise NoAccountError(f"No account available for queue {queue}")
-                if no_active:
-                    logger.warning("No active accounts. Stopping...")
+                if no_eligible:
+                    logger.warning("No accounts eligible for this queue. Stopping...")
                     return None
                 if self._wait_timeout is not None:
                     return None
@@ -488,7 +505,8 @@ class AccountsPool:
 
     async def next_available_at(self, queue: str):
         path = self._json_path(queue)
-        qs = """
+        queue_filter = self._queue_filter(queue)
+        qs = f"""
         SELECT MIN(GREATEST(
             COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(locks, %(path)s)) AS DATETIME), NOW()),
             COALESCE(global_locked_until, NOW()),
@@ -496,6 +514,7 @@ class AccountsPool:
         )) AS lock_until
         FROM accounts
         WHERE active = 1
+          {queue_filter}
         """
         rs = await self._db.fetchone(qs, {"path": path})
         trg = _parse_dt(rs["lock_until"]) if rs else None
@@ -593,6 +612,7 @@ class AccountsPool:
                 "last_used": x.last_used,
                 "total_req": sum(x.stats.values()),
                 "error_msg": str(x.error_msg)[0:60],
+                "can_search": x.can_search,
             }
             items.append(item)
 

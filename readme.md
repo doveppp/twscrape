@@ -362,6 +362,42 @@ user2     True       True    2023-05-20 03:25:45  120        None
 user3     False      False   None                 120        Login error
 ```
 
+The account list also exposes `can_search`: `None` means untested, `True` means
+searchable, and `False` excludes the account from `SearchTimeline` only. Other
+endpoints still use it if active. Record a probe result with
+`await api.pool.set_can_search("user1", False)`; use `True` after a successful
+recheck or `None` to clear the result. This flag is not inferred from request
+errors or empty results, and is not reset by login, cookie updates, or reactivation.
+Existing databases gain the nullable column automatically on first use; the
+database user needs `ALTER` permission for this upgrade.
+
+### Check whether an account can search
+
+Probe a specific account and save the result to `can_search`:
+
+```bash
+# Uses TWS_DB, or pass --db before the command.
+twscrape check_search user1
+```
+
+```python
+result = await api.check_search("user1")
+print(result)  # username, can_search, updated, reason
+```
+
+This also rechecks accounts already marked `can_search=False` or inactive; it
+does not rotate to another account or change `active`, locks, or failure counts.
+It checks one page of a broad `hello` search, retrying once with a fresh
+transaction ID when it sees a known search failure. Actual tweet data confirms
+`True`; two empty-body 404s or two data-less `Internal server error` responses
+record `False`. These failures describe current availability, not a permanent
+ban, and can also occur during endpoint-wide problems.
+
+Empty results, rate limits, authentication errors, invalid responses, and network
+or signing failures return `can_search=None, updated=False` and leave the stored
+flag unchanged. The network probe has a 30-second timeout. A database write
+failure raises instead of reporting a successful update.
+
 ## Limits
 
 `limit` is the target number of parsed objects, not a page size. X/Twitter controls page size per endpoint, so a call can return fewer or more objects than requested.

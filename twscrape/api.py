@@ -1,9 +1,12 @@
+import asyncio
 from collections import deque
 from contextlib import aclosing
 from typing import Literal
+from urllib.parse import urlparse
 
+from .account import Account, has_required_cookies
 from .accounts_pool import AccountsPool
-from .http import Response
+from .http import HttpClient, Response
 from .logger import logger, set_log_level
 from .models import (
     AccountAbout,
@@ -18,7 +21,7 @@ from .models import (
     parse_user,
     parse_users,
 )
-from .queue_client import QueueClient
+from .queue_client import QueueClient, XClIdGenStore, has_data
 from .utils import (
     configure_rate_limit,
     encode_params,
@@ -37,6 +40,9 @@ from .utils import (
 # times before pagination gives up; 0 and 1 both mean "stop on the first empty page".
 DEFAULT_MAX_EMPTY_PAGES = 3
 ENV_MAX_EMPTY_PAGES = "TWS_MAX_EMPTY_PAGES"
+
+SEARCH_CHECK_TIMEOUT = 30.0
+SEARCH_CHECK_QUERY = "hello"
 
 # GQL_OPS_CODEGEN
 OP_AboutAccountQuery = "TzOG2twZEfhr9KmClvVVqA/AboutAccountQuery"
@@ -116,6 +122,24 @@ GQL_FEATURES = {  # search values here (view source) https://x.com/
 
 KV = dict | None
 TrendId = Literal["trending", "news", "sport", "entertainment"] | str
+SearchCheck = tuple[Literal["positive", "negative", "inconclusive"], str]
+
+
+def _search_error_messages(res: dict) -> list[str]:
+    errors = res.get("errors")
+    if not errors:
+        return []
+    if isinstance(errors, dict) or not isinstance(errors, list):
+        errors = [errors]
+    return [str(x.get("message", "")) if isinstance(x, dict) else str(x) for x in errors]
+
+
+def _has_tweet_content(rep: Response) -> bool:
+    # Parsed timeline structure, not entryId/cursor markers: only real tweet content counts.
+    try:
+        return next(parse_tweets(rep), None) is not None
+    except Exception:
+        return False
 
 
 async def _parsed_pages(raw_pages, parser, limit: int, accept=None):
@@ -361,6 +385,129 @@ class API:
         ) as gen:
             async for x in gen:
                 yield x
+
+    async def _search_check_once(
+        self, acc: Account, clt: HttpClient, proxy: str | None, fresh: bool
+    ) -> SearchCheck:
+        try:
+            gen = await XClIdGenStore.get(
+                acc.username, proxy=proxy, cookies=acc.cookies, fresh=fresh
+            )
+            url = f"{GQL_URL}/{OP_SearchTimeline}"
+            params = {
+                "variables": {
+                    "rawQuery": SEARCH_CHECK_QUERY,
+                    "count": 20,
+                    "product": "Latest",
+                    "querySource": "typed_query",
+                },
+                "features": GQL_FEATURES,
+                "fieldToggles": {"withArticleRichContentState": False},
+            }
+            headers = {"x-client-transaction-id": gen.calc("GET", urlparse(url).path or "/")}
+            await rate_limiter.acquire()
+            rep = await clt.request("GET", url, params=encode_params(params), headers=headers)
+        except Exception as e:
+            return "inconclusive", type(e).__name__
+
+        return self._classify_search(rep)
+
+    @staticmethod
+    def _classify_search(rep: Response) -> SearchCheck:
+        if rep.status_code == 404 and not rep.text.strip():
+            return "negative", "search_404"
+        if rep.status_code != 200:
+            return "inconclusive", f"http_{rep.status_code}"
+
+        try:
+            res = rep.json()
+        except Exception as e:
+            return "inconclusive", type(e).__name__
+        if not isinstance(res, dict):
+            return "inconclusive", "invalid_response"
+
+        errors = _search_error_messages(res)
+        if errors:
+            if not has_data(rep, res) and any("internal server error" in x.lower() for x in errors):
+                # shortcut: route failures may be endpoint-wide, recheck after service recovery.
+                return "negative", "search_internal_error"
+            return "inconclusive", "http_200_errors"
+        if _has_tweet_content(rep):
+            return "positive", "ok"
+        return "inconclusive", "empty_search"
+
+    async def _search_check_probe(self, acc: Account) -> SearchCheck:
+        clt = acc.make_client(proxy=self.proxy)
+        try:
+            proxy = acc.resolve_proxy(self.proxy)
+            kind, reason = await self._search_check_once(acc, clt, proxy, fresh=False)
+            if kind != "negative":
+                return kind, reason
+
+            kind, second_reason = await self._search_check_once(acc, clt, proxy, fresh=True)
+            if kind == "negative" and second_reason == reason:
+                return "negative", reason
+            if kind == "negative":
+                return "inconclusive", f"unconfirmed_{second_reason}"
+            return kind, second_reason
+        finally:
+            await clt.aclose()
+
+    async def check_search(self, username: str) -> dict[str, str | bool | None]:
+        """Probe SearchTimeline for one account and persist the result.
+
+        Reads the named account directly, including inactive and already marked
+        accounts, without taking a pool slot or touching locks/stats/failure
+        counters. A decision is stored only after two identical known failures
+        (empty HTTP 404 or HTTP 200 "Internal server error" with no data) or a
+        valid page with tweets. Repeated failures describe availability now and
+        can still reflect an endpoint-wide issue, so recheck later; False is not
+        a permanent suspension. Every other answer leaves can_search unchanged.
+        """
+        acc = await self.pool.get_account(username)
+        if acc is None:
+            return {
+                "username": username,
+                "can_search": None,
+                "updated": False,
+                "reason": "account_not_found",
+            }
+        if not has_required_cookies(acc.cookies):
+            return {
+                "username": username,
+                "can_search": None,
+                "updated": False,
+                "reason": "missing_session",
+            }
+
+        try:
+            kind, reason = await asyncio.wait_for(
+                self._search_check_probe(acc), timeout=SEARCH_CHECK_TIMEOUT
+            )
+        except Exception as e:
+            return {
+                "username": username,
+                "can_search": None,
+                "updated": False,
+                "reason": type(e).__name__,
+            }
+
+        if kind == "inconclusive":
+            return {
+                "username": username,
+                "can_search": None,
+                "updated": False,
+                "reason": reason,
+            }
+
+        can_search = kind == "positive"
+        await self.pool.set_can_search(username, can_search)
+        return {
+            "username": username,
+            "can_search": can_search,
+            "updated": True,
+            "reason": reason,
+        }
 
     # user_by_id
 
