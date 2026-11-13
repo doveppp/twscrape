@@ -6,7 +6,7 @@ import pytest
 
 from twscrape.account import Account
 from twscrape.accounts_pool import NoAccountError
-from twscrape.api import API
+from twscrape.api import API, OP_SearchTimeline
 from twscrape.models import parse_tweets
 from twscrape.queue_client import AbortReqError, ApiError
 from twscrape.utils import gather, get_env_bool
@@ -26,6 +26,18 @@ DEADLINE_EXCEEDED = {"json": {"errors": [{"code": -1, "message": "DeadlineExceed
 
 class MockedError(Exception):
     pass
+
+
+class RecordingClient(MockClient):
+    """MockClient that records each request's encoded params."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls: list[dict] = []
+
+    async def request(self, method, url, **kwargs):
+        self.calls.append(kwargs.get("params") or {})
+        return await super().request(method, url, **kwargs)
 
 
 def load(name: str) -> Any:
@@ -49,7 +61,7 @@ def api_http(api_mock: API, monkeypatch):
     async def fake_sleep(secs):
         pass
 
-    mock = MockClient()
+    mock = RecordingClient()
     monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", fake_sleep)
     monkeypatch.setattr(Account, "make_client", lambda self, proxy=None: mock)
     return api_mock, mock
@@ -98,6 +110,53 @@ async def test_check_search_persists_result_without_changing_account_health(api_
     assert (await api.pool.get("user1")).to_rs() == before
 
 
+SEARCH_KNOWN_FAILURES = [
+    pytest.param({"status_code": 404}, id="empty-404"),
+    pytest.param(
+        {"json": {"errors": [{"code": -1, "message": "Internal server error"}]}},
+        id="ise-200",
+    ),
+]
+
+
+@pytest.mark.parametrize("failure", SEARCH_KNOWN_FAILURES)
+async def test_search_auto_probe_rotates_and_replays_original_request(api_http, failure):
+    api, mock = api_http
+    api.pool._order_by = "username"
+    await api.pool.add_account(
+        "user2", "pass2", "email2", "email_pass2", cookies="auth_token=t2; ct0=c2"
+    )
+    await api.pool.set_active("user2", True)
+
+    mock.add_response(**failure)  # original page on user1
+    mock.add_response(**failure)  # real check_search probe 1
+    mock.add_response(**failure)  # real check_search probe 2 (fresh transaction id)
+    mock.add_response(json=load("raw_search"))  # original page replayed on user2
+
+    results = await gather(api.search("foo", limit=1, kv={"cursor": "abc"}))
+
+    assert results
+    variables = [json.loads(x["variables"]) for x in mock.calls]
+    assert len(variables) == 4
+    assert variables[0] == variables[3]
+    assert variables[0]["rawQuery"] == "foo"
+    assert variables[0]["cursor"] == "abc"
+    assert [x["rawQuery"] for x in variables[1:3]] == ["hello", "hello"]
+
+    user1 = await api.pool.get("user1")
+    assert user1.can_search is False
+    assert user1.active is True
+    assert user1.global_locked_until is None
+    assert user1.xclid_fail_count == 0
+    assert user1.unknown_fail_count == 0
+    assert user1.locks == {}
+
+    user2 = await api.pool.get("user2")
+    assert user2.can_search is None
+    assert user2.active is True
+    assert user2.locks == {}
+
+
 async def test_gql_params(api_mock: API, monkeypatch):
     for func in GQL_GEN:
         args = []
@@ -117,6 +176,34 @@ async def test_gql_params(api_mock: API, monkeypatch):
         # enough distinct results have passed the parser.
         assert args[0][1]["limit"] == -1, f"raw limit not disabled in {func}"
         assert args[0][0][1]["count"] == 100, f"count not changed in {func}"
+
+
+async def test_search_only_passes_check_search_to_queue_client(api_mock: API, monkeypatch):
+    seen = []
+
+    class FakeQueueClient:
+        def __init__(self, pool, queue, debug=False, proxy=None, search_check=None):
+            seen.append((queue, search_check))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr("twscrape.api.QueueClient", FakeQueueClient)
+    assert await gather(api_mock.search("foo")) == []
+    await api_mock.user_by_id(1)
+    await api_mock._gql_item(OP_SearchTimeline, {})
+
+    assert seen == [
+        ("SearchTimeline", api_mock.check_search),
+        ("UserByRestId", None),
+        ("SearchTimeline", api_mock.check_search),
+    ]
 
 
 async def test_article_rich_content_only_in_tweet_details(api_mock: API, monkeypatch):

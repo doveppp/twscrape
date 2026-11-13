@@ -1,11 +1,43 @@
+import asyncio
 from unittest.mock import MagicMock
 
 import pytest
 
 import twscrape.xclid as xclid
-from twscrape.http import CurlClient, HttpxClient, NetworkError
+from twscrape.http import CurlClient, HttpMethod, HttpxClient, NetworkError, Response
 
-from .mock_http import MockClient
+from .mock_http import MockClient, _raw
+
+
+class AssetClient(MockClient):
+    """MockClient that serves asset bodies by URL and records fetched URLs."""
+
+    def __init__(self, pages: dict[str, str]):
+        super().__init__()
+        self.pages = pages
+        self.requested: list[str] = []
+
+    async def request(self, method: HttpMethod, url: str, **kwargs) -> Response:
+        self.requested.append(url)
+        text = self.pages.get(url)
+        return Response(_raw(status_code=200 if text is not None else 404, text=text or ""))
+
+
+class BlockingAssetClient(AssetClient):
+    def __init__(self):
+        super().__init__({})
+        self.started = asyncio.Event()
+        self.cancelled = 0
+
+    async def request(self, method: HttpMethod, url: str, **kwargs) -> Response:
+        self.requested.append(url)
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+        raise AssertionError("fetch should never complete")
 
 
 class FakeClient:
@@ -237,3 +269,170 @@ async def test_find_indices_url_returns_reference_despite_unrelated_failure():
     )
 
     assert url == "https://x.test/assets/sign.o-abc123.js"
+
+
+# MARK: Vite / botox chunk discovery (offline structural fixtures)
+
+ENTRY = "https://abs.twimg.com/x-web/x-web/entry-client-CQLfyhKh.js"
+BOTOX_CHUNK = "https://abs.twimg.com/x-web/x-web/assets/C_7CIfHL.js"
+SIGNER = "https://abs.twimg.com/x-web/x-web/assets/f-hq5jg0.js"
+
+
+async def test_find_indices_url_discovers_hashed_vite_signer_two_hops():
+    # Current build: page links the entry client, which statically imports the
+    # botox chunk; the botox chunk template-imports the hashed signer.
+    client = AssetClient(
+        {
+            ENTRY: (
+                'import{a as t}from"./assets/B644W4is.js";'
+                'import"./assets/C_7CIfHL.js";'
+                'import{x}from"./assets/CI64jODp.js"'
+            ),
+            BOTOX_CHUNK: (
+                "const l=()=>import(`./f-hq5jg0.js`).then(e=>e.default());"
+                'const m="x-botox-client-transaction-id"'
+            ),
+        }
+    )
+
+    url = await xclid._find_indices_url([ENTRY], client)
+
+    assert url == SIGNER
+    # Two unrelated static imports are 404s; they must not stop discovery.
+    assert set(client.requested) == {
+        ENTRY,
+        BOTOX_CHUNK,
+        "https://abs.twimg.com/x-web/x-web/assets/B644W4is.js",
+        "https://abs.twimg.com/x-web/x-web/assets/CI64jODp.js",
+    }
+
+
+@pytest.mark.parametrize("quote", ['"', "'", "`"])
+async def test_find_indices_url_botox_import_supports_literal_quotes_and_spacing(quote):
+    chunk = "https://abs.twimg.com/x-web/x-web/assets/C_7CIfHL.js"
+    body = (
+        f"const p=()=>import( {quote}./f-hq5jg0.js{quote} )"
+        f".then( v => v.default() );const m=`x-botox-client-transaction-id`"
+    )
+    client = AssetClient({chunk: body})
+
+    url = await xclid._find_indices_url([chunk], client)
+
+    assert url == SIGNER
+    assert client.requested == [chunk]
+
+
+async def test_find_indices_url_keeps_old_named_x_web_signer_reference():
+    client = AssetClient({ENTRY: 'const a=()=>import("./assets/sign.o-abc123.js")'})
+
+    url = await xclid._find_indices_url([ENTRY], client)
+
+    assert url == "https://abs.twimg.com/x-web/x-web/assets/sign.o-abc123.js"
+
+
+async def test_find_indices_url_does_not_follow_unmarked_default_import():
+    # A generic lazy default import is not the botox signer; without the marker
+    # it must stay unfetched.
+    client = AssetClient({ENTRY: 'const a=()=>import("./assets/decoy.js").then(e=>e.default());'})
+
+    with pytest.raises(xclid.XClIdParseError, match=r"assets: 1 loaded, 0 failed"):
+        await xclid._find_indices_url([ENTRY], client)
+
+    assert client.requested == [ENTRY]
+
+
+async def test_find_indices_url_dedups_cycles_and_stops_after_static_expansion():
+    a = "https://abs.twimg.com/x-web/x-web/assets/a.js"
+    b = "https://abs.twimg.com/x-web/x-web/assets/b.js"
+    c = "https://abs.twimg.com/x-web/x-web/assets/c.js"
+    client = AssetClient(
+        {
+            ENTRY: 'import"./assets/a.js";import"./assets/b.js"',
+            a: 'import"./b.js";import"../entry-client-CQLfyhKh.js"',
+            b: 'import"./a.js";import"./c.js"',
+            c: "import(`./f-hq5jg0.js`).then(e=>e.default());x-botox-client-transaction-id",
+        }
+    )
+
+    with pytest.raises(xclid.XClIdParseError, match=r"assets: 3 loaded, 0 failed"):
+        await xclid._find_indices_url([ENTRY], client)
+
+    # c is one static level too deep; cycles and re-imports are fetched once.
+    assert set(client.requested) == {ENTRY, a, b}
+    assert len(client.requested) == len(set(client.requested)) == 3
+
+
+async def test_find_indices_url_does_not_fetch_untrusted_embedded_urls():
+    client = AssetClient(
+        {
+            ENTRY: (
+                'import"https://evil.test/assets/x.js";'
+                'import"../../../../evil/y.js";'
+                'import"./assets/ok.js"'
+            ),
+        }
+    )
+
+    with pytest.raises(xclid.XClIdParseError):
+        await xclid._find_indices_url([ENTRY], client)
+
+    assert set(client.requested) == {
+        ENTRY,
+        "https://abs.twimg.com/x-web/x-web/assets/ok.js",
+    }
+    assert not any("evil" in url for url in client.requested)
+
+
+async def test_parse_anim_idx_uses_direct_legacy_ondemand_signer(monkeypatch):
+    html = (
+        '<script src="https://abs.twimg.com/responsive-web/client-web/'
+        'ondemand.s-abc123.js"></script>'
+    )
+    seen = {}
+
+    async def fake_get_tw_page_text(url, clt):
+        seen["url"] = url
+        return "(x[43],16),(x[2],16)"
+
+    monkeypatch.setattr(xclid, "get_tw_page_text", fake_get_tw_page_text)
+
+    assert await xclid.parse_anim_idx(html, MockClient()) == [43, 2]
+    assert seen["url"] == "https://abs.twimg.com/responsive-web/client-web/ondemand.s-abc123.js"
+
+
+async def test_find_indices_url_cancels_inflight_fetches():
+    client = BlockingAssetClient()
+    task = asyncio.create_task(xclid._find_indices_url([ENTRY], client))
+    await client.started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert client.cancelled == 1
+
+
+async def test_parse_anim_idx_reads_hashed_signer():
+    client = AssetClient(
+        {
+            ENTRY: 'import"./assets/C_7CIfHL.js"',
+            BOTOX_CHUNK: (
+                "import(`./f-hq5jg0.js`).then(e=>e.default());"
+                'const header="x-botox-client-transaction-id"'
+            ),
+            SIGNER: "(x[43],16),(x[2],16),(x[43],16),(x[47],16)",
+        }
+    )
+
+    assert await xclid.parse_anim_idx(f'<script src="{ENTRY}"></script>', client) == [43, 2, 43, 47]
+
+
+async def test_find_indices_url_caps_static_asset_requests(monkeypatch):
+    monkeypatch.setattr(xclid, "_CRAWL_MAX_ASSETS", 3)
+    body = "".join(f'import"./assets/chunk-{i}.js";' for i in range(10))
+    client = AssetClient({ENTRY: body})
+
+    with pytest.raises(xclid.XClIdParseError, match=r"assets: 1 loaded, 2 failed"):
+        await xclid._find_indices_url([ENTRY], client)
+
+    assert len(client.requested) == 3

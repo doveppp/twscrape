@@ -1,3 +1,4 @@
+import asyncio
 import json
 import pickle
 from collections import OrderedDict
@@ -11,6 +12,7 @@ from twscrape.account import Account
 from twscrape.accounts_pool import AccountsPool
 from twscrape.http import ConnectError, HttpMethod, NetworkError, Response
 from twscrape.queue_client import (
+    MAX_XCLID_FAILED_ACCOUNTS,
     AbortReqError,
     ApiError,
     GqlFeaturesOutdatedError,
@@ -36,6 +38,35 @@ async def get_locked(pool: AccountsPool) -> set[str]:
 async def get_inactive(pool: AccountsPool) -> set[str]:
     rep = await pool.get_all()
     return {x.username for x in rep if not x.active}
+
+
+class RecordingClient(MockClient):
+    def __init__(self):
+        super().__init__()
+        self.calls: list[tuple[str, str, dict]] = []
+
+    async def request(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        return await super().request(method, url, **kwargs)
+
+
+async def add_search_accounts(pool: AccountsPool, count=2):
+    pool._order_by = "username"
+    for i in range(1, count + 1):
+        await pool.add_account(
+            f"user{i}",
+            f"pass{i}",
+            f"email{i}",
+            f"email_pass{i}",
+            cookies=f"auth_token=token{i}; ct0=csrf{i}",
+        )
+        await pool.set_active(f"user{i}", True)
+
+
+def search_client(monkeypatch, pool: AccountsPool, callback, queue="SearchTimeline"):
+    mock = RecordingClient()
+    monkeypatch.setattr(Account, "make_client", lambda self, proxy=None: mock)
+    return QueueClient(pool, queue, search_check=callback), mock
 
 
 async def test_lock_account_when_used(client_fixture: CF):
@@ -1336,3 +1367,337 @@ async def test_rate_limit_pause_clears_lease_but_not_health(client_fixture: CF):
     user1 = await pool.get("user1")
     assert user1.locks.get("SearchTimeline") is not None
     assert user1.xclid_fail_count == 1
+
+
+async def test_search_check_false_rotates_and_replays_same_request(
+    pool_mock: AccountsPool, monkeypatch
+):
+    await add_search_accounts(pool_mock)
+    calls = []
+
+    async def callback(username):
+        calls.append(username)
+        await pool_mock.set_can_search(username, False)
+        return {
+            "username": username,
+            "can_search": False,
+            "updated": True,
+            "reason": "search_404",
+        }
+
+    client, mock = search_client(monkeypatch, pool_mock, callback)
+    params = {"variables": {"rawQuery": "foo", "cursor": "abc"}}
+    mock.add_response(status_code=404, json={})
+    mock.add_response(json={"ok": True})
+
+    rep = await client.get(URL, params=params)
+
+    assert getattr(rep, "__username") == "user2"
+    assert calls == ["user1"]
+    # the first empty 404 is handed to the check, not retried with a new xclid
+    assert len(mock.calls) == 2
+    assert mock.calls[0][2]["params"] == mock.calls[1][2]["params"] == params
+
+    user1 = await pool_mock.get("user1")
+    assert user1.can_search is False
+    assert user1.active is True
+    assert user1.global_locked_until is None
+    assert user1.xclid_fail_count == 0
+    assert user1.unknown_fail_count == 0
+    assert "SearchTimeline" not in user1.locks
+
+    await client.__aexit__(None, None, None)
+    user2 = await pool_mock.get("user2")
+    assert user2.active is True
+    assert user2.locks == {}
+
+
+async def test_search_check_all_accounts_false_stops(pool_mock: AccountsPool, monkeypatch):
+    await add_search_accounts(pool_mock)
+    calls = []
+
+    async def callback(username):
+        calls.append(username)
+        await pool_mock.set_can_search(username, False)
+        return {
+            "username": username,
+            "can_search": False,
+            "updated": True,
+            "reason": "search_404",
+        }
+
+    client, mock = search_client(monkeypatch, pool_mock, callback)
+    mock.add_response(status_code=404, json={})
+    mock.add_response(status_code=404, json={})
+
+    with pytest.raises(AbortReqError, match="No searchable account"):
+        await client.get(URL)
+
+    assert calls == ["user1", "user2"]
+    assert len(mock.calls) == 2
+    await client.__aexit__(None, None, None)
+
+    for account in await pool_mock.get_all():
+        assert account.can_search is False
+        assert account.active is True
+        assert account.global_locked_until is None
+        assert account.xclid_fail_count == 0
+        assert account.unknown_fail_count == 0
+        assert account.locks == {}
+
+
+async def test_search_check_duplicate_account_stops_rotation(pool_mock: AccountsPool, monkeypatch):
+    await add_search_accounts(pool_mock, 1)
+    calls = []
+
+    async def callback(username):
+        calls.append(username)
+        # A custom pool may keep returning the same account despite the result.
+        return {
+            "username": username,
+            "can_search": False,
+            "updated": True,
+            "reason": "search_404",
+        }
+
+    client, mock = search_client(monkeypatch, pool_mock, callback)
+    mock.add_response(status_code=404, json={})
+    mock.add_response(status_code=404, json={})
+
+    with pytest.raises(AbortReqError, match="repeatedly"):
+        await client.get(URL)
+
+    assert calls == ["user1"]
+    assert len(mock.calls) == 2
+    await client.__aexit__(None, None, None)
+
+
+async def test_search_check_distinct_account_failures_are_capped(
+    pool_mock: AccountsPool, monkeypatch
+):
+    await add_search_accounts(pool_mock, MAX_XCLID_FAILED_ACCOUNTS + 1)
+    calls = []
+
+    async def callback(username):
+        calls.append(username)
+        await pool_mock.set_can_search(username, False)
+        return {
+            "username": username,
+            "can_search": False,
+            "updated": True,
+            "reason": "search_404",
+        }
+
+    client, mock = search_client(monkeypatch, pool_mock, callback)
+    for _ in range(MAX_XCLID_FAILED_ACCOUNTS + 1):
+        mock.add_response(status_code=404, json={})
+
+    with pytest.raises(AbortReqError, match="trying 10 accounts"):
+        await client.get(URL)
+
+    assert len(calls) == MAX_XCLID_FAILED_ACCOUNTS
+    assert len(mock.calls) == MAX_XCLID_FAILED_ACCOUNTS + 1
+    untouched = [x for x in await pool_mock.get_all() if x.can_search is None]
+    assert len(untouched) == 1 and untouched[0].active is True
+
+    await client.__aexit__(None, None, None)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {
+            "username": "user1",
+            "can_search": None,
+            "updated": False,
+            "reason": "empty_search",
+        },
+    ],
+)
+async def test_search_check_unconfirmed_aborts_without_penalty(
+    pool_mock: AccountsPool, monkeypatch, result
+):
+    await add_search_accounts(pool_mock, 1)
+    calls = []
+
+    async def callback(username):
+        calls.append(username)
+        return result
+
+    client, mock = search_client(monkeypatch, pool_mock, callback)
+    mock.add_response(status_code=404, json={})
+
+    with pytest.raises(ApiError, match="inconclusive"):
+        await client.get(URL)
+
+    assert calls == ["user1"]
+    assert len(mock.calls) == 1
+    await client.__aexit__(None, None, None)
+
+    user1 = await pool_mock.get("user1")
+    assert user1.can_search is None
+    assert user1.active is True
+    assert user1.global_locked_until is None
+    assert user1.xclid_fail_count == 0
+    assert user1.unknown_fail_count == 0
+    assert user1.locks == {}
+
+
+async def test_search_check_db_error_propagates_once(pool_mock: AccountsPool, monkeypatch):
+    await add_search_accounts(pool_mock, 1)
+    calls = []
+
+    async def callback(username):
+        calls.append(username)
+        raise RuntimeError("db unavailable")
+
+    client, mock = search_client(monkeypatch, pool_mock, callback)
+    mock.add_response(status_code=404, json={})
+
+    with pytest.raises(RuntimeError, match="db unavailable"):
+        await client.get(URL)
+
+    assert calls == ["user1"]
+    assert len(mock.calls) == 1
+    await client.__aexit__(None, None, None)
+
+    user1 = await pool_mock.get("user1")
+    assert user1.active is True
+    assert user1.xclid_fail_count == 0
+    assert user1.unknown_fail_count == 0
+    assert user1.locks == {}
+
+
+async def test_search_internal_error_with_partial_data_is_not_checked(
+    pool_mock: AccountsPool, monkeypatch
+):
+    await add_search_accounts(pool_mock, 1)
+    calls = []
+
+    async def callback(username):
+        calls.append(username)
+        raise AssertionError("callback must not run")
+
+    client, mock = search_client(monkeypatch, pool_mock, callback)
+    payload = {
+        "data": {"search_by_raw_query": {"tweets": ["partial"]}},
+        "errors": [{"code": -1, "message": "Internal server error"}],
+    }
+    mock.add_response(json=payload)
+
+    rep = await client.get(URL)
+
+    assert rep is not None and rep.json() == payload
+    assert calls == []
+    assert len(mock.calls) == 1
+
+    await client.__aexit__(None, None, None)
+
+
+async def test_empty_search_does_not_run_check(pool_mock: AccountsPool, monkeypatch):
+    await add_search_accounts(pool_mock, 1)
+    calls = []
+
+    async def callback(username):
+        calls.append(username)
+        raise AssertionError("callback must not run")
+
+    client, mock = search_client(monkeypatch, pool_mock, callback)
+    mock.add_response(json={"data": {}})
+
+    rep = await client.get(URL)
+
+    assert rep is not None and rep.json() == {"data": {}}
+    assert calls == []
+    assert len(mock.calls) == 1
+
+    await client.__aexit__(None, None, None)
+
+
+async def test_empty_404_without_callback_keeps_xclid_retry(pool_mock: AccountsPool, monkeypatch):
+    await add_search_accounts(pool_mock, 1)
+    mock = RecordingClient()
+    monkeypatch.setattr(Account, "make_client", lambda self, proxy=None: mock)
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", AsyncMock())
+    client = QueueClient(pool_mock, "SearchTimeline")
+
+    mock.add_response(status_code=404, json={})
+    mock.add_response(json={"ok": True})
+
+    rep = await client.get(URL)
+
+    assert rep is not None and rep.json() == {"ok": True}
+    assert len(mock.calls) == 2
+
+    await client.__aexit__(None, None, None)
+
+
+async def test_nonsearch_queue_never_calls_search_check(pool_mock: AccountsPool, monkeypatch):
+    await add_search_accounts(pool_mock, 1)
+    calls = []
+
+    async def callback(username):
+        calls.append(username)
+        raise AssertionError("callback must not run")
+
+    client, mock = search_client(monkeypatch, pool_mock, callback, queue="UserTweets")
+    mock.add_response(json={"errors": [{"code": -1, "message": "Internal server error"}]})
+
+    with pytest.raises(ApiError):
+        await client.get(URL)
+
+    assert calls == []
+    await client.__aexit__(None, None, None)
+
+
+async def test_nonsearch_empty_404_keeps_xclid_retry(pool_mock: AccountsPool, monkeypatch):
+    await add_search_accounts(pool_mock, 1)
+    calls = []
+
+    async def callback(username):
+        calls.append(username)
+        raise AssertionError("callback must not run")
+
+    client, mock = search_client(monkeypatch, pool_mock, callback, queue="UserTweets")
+    monkeypatch.setattr("twscrape.queue_client.asyncio.sleep", AsyncMock())
+    mock.add_response(status_code=404, json={})
+    mock.add_response(json={"ok": True})
+
+    rep = await client.get(URL)
+
+    assert rep is not None
+    assert calls == []
+    assert len(mock.calls) == 2
+    await client.__aexit__(None, None, None)
+
+
+async def test_search_check_cancellation_releases_lease(pool_mock: AccountsPool, monkeypatch):
+    await add_search_accounts(pool_mock, 1)
+    started = asyncio.Event()
+    calls = []
+
+    async def callback(username):
+        calls.append(username)
+        started.set()
+        await asyncio.Event().wait()
+
+    mock = RecordingClient()
+    monkeypatch.setattr(Account, "make_client", lambda self, proxy=None: mock)
+    mock.add_response(status_code=404, json={})
+
+    async def run():
+        async with QueueClient(pool_mock, "SearchTimeline", search_check=callback) as client:
+            return await client.get(URL)
+
+    task = asyncio.create_task(run())
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert calls == ["user1"]
+    user1 = await pool_mock.get("user1")
+    assert user1.active is True
+    assert user1.locks == {}
+    assert user1._tx is None

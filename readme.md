@@ -362,8 +362,8 @@ The account list also exposes `can_search`: `None` means untested, `True` means
 searchable, and `False` excludes the account from `SearchTimeline` only. Other
 endpoints still use it if active. Record a probe result with
 `await api.pool.set_can_search("user1", False)`; use `True` after a successful
-recheck or `None` to clear the result. This flag is not inferred from request
-errors or empty results, and is not reset by login, cookie updates, or reactivation.
+recheck or `None` to clear the result. This flag is only updated by a probe,
+never by an empty result, and is not reset by login, cookie updates, or reactivation.
 Existing databases gain the nullable column automatically on first use; the
 database user needs `ALTER` permission for this upgrade.
 
@@ -393,6 +393,20 @@ Empty results, rate limits, authentication errors, invalid responses, and networ
 or signing failures return `can_search=None, updated=False` and leave the stored
 flag unchanged. The network probe has a 30-second timeout. A database write
 failure raises instead of reporting a successful update.
+
+API searches automatically call `check_search` for the account that returns an
+empty-body 404 or a data-less `Internal server error`. If the probe confirms
+`False`, the account is excluded from search and the original query/page is
+retried with another account, without deactivating it or adding a global lock.
+At most ten confirmed failures are handled per request. A successful `hello`
+probe allows one retry of the original query/page on the same account. If that
+retry fails again, or the probe is inconclusive, the original search raises
+rather than silently returning an empty result. Exhausting the
+search pool after confirmed failures also raises. Probe database errors
+propagate. Ordinary empty search results do not trigger a probe;
+rate limits, authentication errors, and other endpoints keep their existing
+handling. Standalone `QueueClient` instances without the API callback do not
+enable this automatic check.
 
 ## Limits
 

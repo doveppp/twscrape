@@ -21,7 +21,12 @@ from .models import (
     parse_user,
     parse_users,
 )
-from .queue_client import QueueClient, XClIdGenStore, has_data
+from .queue_client import (
+    QueueClient,
+    XClIdGenStore,
+    search_error_messages,
+    search_failure_reason,
+)
 from .utils import (
     configure_rate_limit,
     encode_params,
@@ -123,15 +128,6 @@ GQL_FEATURES = {  # search values here (view source) https://x.com/
 KV = dict | None
 TrendId = Literal["trending", "news", "sport", "entertainment"] | str
 SearchCheck = tuple[Literal["positive", "negative", "inconclusive"], str]
-
-
-def _search_error_messages(res: dict) -> list[str]:
-    errors = res.get("errors")
-    if not errors:
-        return []
-    if isinstance(errors, dict) or not isinstance(errors, list):
-        errors = [errors]
-    return [str(x.get("message", "")) if isinstance(x, dict) else str(x) for x in errors]
 
 
 def _has_tweet_content(rep: Response) -> bool:
@@ -310,7 +306,13 @@ class API:
         empty_pages = 0
         seen: set[tuple[str, ...]] = set()
 
-        async with QueueClient(self.pool, queue, self.debug, proxy=self.proxy) as client:
+        async with QueueClient(
+            self.pool,
+            queue,
+            self.debug,
+            proxy=self.proxy,
+            search_check=self.check_search if queue == "SearchTimeline" else None,
+        ) as client:
             while active:
                 params = {"variables": kv, "features": ft}
                 if cur is not None:
@@ -349,7 +351,13 @@ class API:
     ):
         ft = ft or {}
         queue = op.split("/")[-1]
-        async with QueueClient(self.pool, queue, self.debug, proxy=self.proxy) as client:
+        async with QueueClient(
+            self.pool,
+            queue,
+            self.debug,
+            proxy=self.proxy,
+            search_check=self.check_search if queue == "SearchTimeline" else None,
+        ) as client:
             params = {"variables": {**kv}, "features": {**GQL_FEATURES, **ft}}
             if toggles:
                 params["fieldToggles"] = toggles
@@ -414,8 +422,9 @@ class API:
 
     @staticmethod
     def _classify_search(rep: Response) -> SearchCheck:
-        if rep.status_code == 404 and not rep.text.strip():
-            return "negative", "search_404"
+        negative = search_failure_reason(rep)
+        if negative:
+            return "negative", negative
         if rep.status_code != 200:
             return "inconclusive", f"http_{rep.status_code}"
 
@@ -426,11 +435,8 @@ class API:
         if not isinstance(res, dict):
             return "inconclusive", "invalid_response"
 
-        errors = _search_error_messages(res)
+        errors = search_error_messages(res)
         if errors:
-            if not has_data(rep, res) and any("internal server error" in x.lower() for x in errors):
-                # shortcut: route failures may be endpoint-wide, recheck after service recovery.
-                return "negative", "search_internal_error"
             return "inconclusive", "http_200_errors"
         if _has_tweet_content(rep):
             return "positive", "ok"

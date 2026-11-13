@@ -6,7 +6,7 @@ import re
 from datetime import timezone
 from email.utils import parsedate_to_datetime
 from enum import Enum, auto
-from typing import Any
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 from . import telemetry
@@ -26,6 +26,7 @@ from .utils import rate_limiter, utc
 from .xclid import XClIdAccountError, XClIdGen, XClIdParseError
 
 ReqParams = dict[str, str | int] | None
+SearchCheckFn = Callable[[str], Awaitable[dict[str, str | bool | None]]]
 MISSING_FEATURES_RE = re.compile(r"The following features cannot be null: ([^;]+)")
 TMP_TS = utc.now().isoformat().split(".")[0].replace("T", "_").replace(":", "-")[0:16]
 
@@ -49,6 +50,10 @@ class HandledError(Exception): ...
 
 
 class AbortReqError(Exception): ...
+
+
+class _SearchCheckError(Exception):
+    """Carries a callback failure past the request retry handlers."""
 
 
 class XClIdRetryExhaustedError(AbortReqError):
@@ -103,11 +108,18 @@ class XClIdGenStore:
 
 
 class Ctx:
-    def __init__(self, acc: Account, clt: HttpClient, proxy: str | None = None):
+    def __init__(
+        self,
+        acc: Account,
+        clt: HttpClient,
+        proxy: str | None = None,
+        return_empty_404=False,
+    ):
         self.req_count = 0
         self.acc = acc
         self.clt = clt
         self.proxy = proxy
+        self.return_empty_404 = return_empty_404
         self.fails = dict.fromkeys(FailKind, 0)
 
     def fail(self, kind: FailKind) -> bool:
@@ -144,6 +156,10 @@ class Ctx:
             rep = await self.clt.request(method, url, params=params, headers=hdr)
             if rep.status_code != 404:
                 return rep
+            # An empty 404 may be a search restriction; let the probe distinguish
+            # it from a stale transaction id before applying account penalties.
+            if self.return_empty_404 and not rep.text.strip():
+                return rep
 
             tries += 1
             logger.debug(f"Retrying request with new x-client-transaction-id: {url}")
@@ -178,6 +194,62 @@ def has_data(rep: Response, res: Any) -> bool:
 
 def has_error(errors: list[str], prefix: str) -> bool:
     return any(error.startswith(prefix) for error in errors)
+
+
+def search_error_messages(res: dict) -> list[str]:
+    errors = res.get("errors")
+    if not errors:
+        return []
+    if isinstance(errors, dict) or not isinstance(errors, list):
+        errors = [errors]
+    return [str(x.get("message", "")) if isinstance(x, dict) else str(x) for x in errors]
+
+
+def search_failure_reason(rep: Response) -> str | None:
+    """Return a known SearchTimeline route-failure reason, else None."""
+    if rep.status_code == 404 and not rep.text.strip():
+        return "search_404"
+    if rep.status_code != 200:
+        return None
+
+    try:
+        res = rep.json()
+    except Exception:
+        return None
+    if not isinstance(res, dict):
+        return None
+
+    errors = search_error_messages(res)
+    if not errors or has_data(rep, res):
+        return None
+    if any("internal server error" in x.lower() for x in errors):
+        return "search_internal_error"
+    return None
+
+
+def search_check_outcome(
+    reason: str, probe: dict[str, str | bool | None], replayed: bool
+) -> ApiError:
+    """Describe a search failure the account check did not resolve.
+
+    Only a persisted (updated) answer is a decision; anything else proves
+    nothing about the route, so it aborts instead of rotating the account.
+    """
+    detail = (
+        f"updated={probe.get('updated')}, can_search={probe.get('can_search')}, "
+        f"reason={probe.get('reason', 'unknown')}"
+    )
+    if probe.get("updated") is True and probe.get("can_search") is True:
+        replay = "an identical replay on the same account also failed" if replayed else ""
+        return ApiError(
+            f"Search failed ({reason}) but the account check passed ({detail})"
+            f"{f'; {replay}' if replay else ''}; aborting"
+        )
+    if probe.get("error"):
+        msg = f"Search failed ({reason}) and the account check itself failed ({detail})"
+    else:
+        msg = f"Search failed ({reason}) but the account check was inconclusive ({detail})"
+    return ApiError(f"{msg}; aborting")
 
 
 def retry_after_seconds(rep: Response) -> float | None:
@@ -261,12 +333,24 @@ class QueueClient:
     # Flags self-healed per operation, shared so later clients don't repeat the failed request
     healed_features: dict[str, set[str]] = {}
 
-    def __init__(self, pool: AccountsPool, queue: str, debug=False, proxy: str | None = None):
+    def __init__(
+        self,
+        pool: AccountsPool,
+        queue: str,
+        debug=False,
+        proxy: str | None = None,
+        search_check: SearchCheckFn | None = None,
+    ):
         self.pool = pool
         self.queue = queue
         self.debug = debug
         self.ctx: Ctx | None = None
         self.proxy = proxy
+        self.search_check = search_check
+
+    @property
+    def _search_check_active(self) -> bool:
+        return self.queue == "SearchTimeline" and self.search_check is not None
 
     async def __aenter__(self):
         await self._get_ctx()
@@ -352,7 +436,12 @@ class QueueClient:
 
         try:
             clt = acc.make_client(proxy=self.proxy)
-            self.ctx = Ctx(acc, clt, proxy=acc.resolve_proxy(self.proxy))
+            self.ctx = Ctx(
+                acc,
+                clt,
+                proxy=acc.resolve_proxy(self.proxy),
+                return_empty_404=self._search_check_active,
+            )
         except BaseException:
             await self.pool.unlock(acc.username, self.queue, tx=acc._tx)
             raise
@@ -481,12 +570,21 @@ class QueueClient:
 
         features_retried = False
         self._xclid_failed_accounts = 0
+        search_failed: set[str] = set()
+        # At most one signing-store recovery per req() call; the probe result is
+        # kept so a repeated failure on the same account is not probed again.
+        recovered: str | None = None
+        recovered_probe: dict[str, str | bool | None] = {}
 
         while True:
             # 1. same ctx until _close_ctx() clears it — that's retry vs rotate
             # 2. no aclose() needed here, __aexit__ handles it
             ctx = await self._get_ctx()
             if ctx is None:
+                if search_failed:
+                    raise AbortReqError(
+                        "No searchable account left after confirmed search failures"
+                    )
                 return None
 
             if not has_required_cookies(ctx.acc.cookies):
@@ -509,12 +607,67 @@ class QueueClient:
                 )
                 rep = await ctx.req(method, url, params=params)
                 setattr(rep, "__username", ctx.acc.username)
+
+                if (
+                    self.queue == "SearchTimeline"
+                    and self.search_check is not None
+                    and (reason := search_failure_reason(rep)) is not None
+                ):
+                    username = ctx.acc.username
+                    if username in search_failed:
+                        raise AbortReqError(
+                            f"Search check failed repeatedly for {username}; aborting"
+                        )
+                    if len(search_failed) >= MAX_XCLID_FAILED_ACCOUNTS:
+                        raise AbortReqError(
+                            f"Search check failed after trying {MAX_XCLID_FAILED_ACCOUNTS} accounts"
+                        )
+
+                    if username == recovered:
+                        raise search_check_outcome(reason, recovered_probe, True)
+
+                    try:
+                        probe = await self.search_check(username)
+                    except Exception as e:
+                        raise _SearchCheckError(e) from e
+
+                    # A confirmed route failure rotates the account without
+                    # touching its health counters.
+                    if probe.get("updated") is True and probe.get("can_search") is False:
+                        search_failed.add(username)
+                        logger.warning(
+                            f"Search unavailable for {username} ({reason}); "
+                            "retrying with another account"
+                        )
+                        await self._close_ctx()
+                        continue
+
+                    # The account answered a search, so the failure is not a
+                    # confirmed account limitation: invalidate the signing
+                    # store and replay the request once on this account.
+                    if (
+                        probe.get("updated") is True
+                        and probe.get("can_search") is True
+                        and recovered is None
+                    ):
+                        recovered, recovered_probe = username, probe
+                        XClIdGenStore.items.pop(username, None)
+                        logger.info(
+                            f"Search failed ({reason}) for {username} but the account "
+                            "check passed; retrying once with a refreshed signing key"
+                        )
+                        continue
+
+                    raise search_check_outcome(reason, probe, False)
                 await self._check_rep(rep)
 
                 ctx.req_count += 1  # count only successful
-                ctx.fails = dict.fromkeys(ctx.fails, 0)  # budget is per request, not per crawl
+                ctx.fails = dict.fromkeys(ctx.fails, 0)  # budget per request
                 await self._reset_fail_counts(ctx.acc)
                 return rep
+            except _SearchCheckError as e:
+                # A probe/DB failure is not an account or transport problem.
+                raise e.__cause__ or e
             except GqlFeaturesOutdatedError as e:
                 # X names the flags it wants, so set them and retry once. GQL_FEATURES still
                 # needs a permanent update — the warning says so — but a stale dict shouldn't

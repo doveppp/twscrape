@@ -5,7 +5,7 @@ import math
 import random
 import re
 import time
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import bs4
 
@@ -258,12 +258,79 @@ def parse_vk_bytes(soup: bs4.BeautifulSoup) -> list[int]:
 # \b guards against substring hits like `design.o-*.js`.
 INDICES_FILE_RE = re.compile(r"(?:\.{0,2}/)?[\w./-]*?\b(?:ondemand\.s|sign\.o)[\w.-]*\.js")
 
+# New hashed Vite build: the signer has a content hash (e.g. f-hq5jg0.js) and
+# is only reachable through the chunk implementing the botox transaction-id
+# plugin. That chunk marks itself with this string and preloads the signer via
+# `import(`./signer.js`).then(v => v.default())`.
+BOTOX_MARKER = "x-botox-client-transaction-id"
+BOTOX_SIGNER_REF_RE = re.compile(
+    r"""import\(\s*(["'`])([^"'`]+?\.js)\1\s*\)\s*\.then\(\s*([\w$]+)\s*=>\s*\3\s*\.default\(\s*\)\s*\)"""
+)
+
+# Static ESM imports/reexports: `from "./x.js"`, `import "./x.js"`. Deliberately
+# not `import(...)`: Vite builds list hundreds of lazy chunks in mapDeps and in
+# dynamic imports, and crawling all of them would be both slow and pointless.
+STATIC_ASSET_REF_RE = re.compile(r"""(?:\bfrom\s*|\bimport\s*)(["'`])([^"'`]+?\.js)\1""")
+
+# Keep the crawl bounded: linked scripts plus one static-import expansion
+# (page entry -> botox chunk -> signer). 128 assets is well above the current
+# x-web page size while preventing runaway fetches from a malformed bundle.
+_CRAWL_MAX_ASSETS = 128
+_CRAWL_STATIC_DEPTH = 1
+
+
+def _asset_roots(urls: list[str]) -> list[tuple[str, str, str]]:
+    roots = set()
+    for url in urls:
+        parsed = urlsplit(url)
+        if parsed.scheme in ("http", "https") and parsed.netloc:
+            roots.add((parsed.scheme, parsed.netloc, parsed.path.rsplit("/", 1)[0] + "/"))
+    return list(roots)
+
+
+def _is_trusted_asset(url: str, roots: list[tuple[str, str, str]]) -> bool:
+    # Never follow URLs embedded in JS to an arbitrary host/path: asset
+    # references must stay on the scheme+host and under a directory of one of
+    # the page-linked scripts.
+    parsed = urlsplit(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return False
+    if not parsed.path.endswith(".js"):
+        return False
+    return any(
+        parsed.scheme == scheme and parsed.netloc == netloc and parsed.path.startswith(path)
+        for scheme, netloc, path in roots
+    )
+
+
+def _static_asset_refs(body: str, base_url: str, roots: list[tuple[str, str, str]]) -> list[str]:
+    refs = []
+    for match in STATIC_ASSET_REF_RE.finditer(body):
+        ref = urljoin(base_url, match.group(2))
+        if _is_trusted_asset(ref, roots):
+            refs.append(ref)
+    return refs
+
 
 async def _find_indices_url(scripts: list[str], clt: HttpClient) -> str:
-    # The indices file (sign.o-*.js) is not linked in the page directly — it is
-    # dynamically imported from one of the bundle chunks. Scan chunks
-    # concurrently and resolve the first reference we find, then stop.
+    # Legacy/current-named builds link the indices file directly. Keep this
+    # check local so callers that skip parse_anim_idx's direct handling work too.
+    ref = next((url for url in scripts if INDICES_FILE_RE.search(url)), None)
+    if ref:
+        return ref
+
+    roots = _asset_roots(scripts)
+    queue = list(dict.fromkeys(scripts))
+    if len(queue) > _CRAWL_MAX_ASSETS:
+        logger.trace(f"XClId asset crawl truncated to {_CRAWL_MAX_ASSETS} of {len(queue)}")
+        queue = queue[:_CRAWL_MAX_ASSETS]
+
+    # Scan chunks concurrently, bounded to two levels: the scripts linked in the
+    # page and their static imports. This finds the botox chunk in the current
+    # build without touching Vite's hundreds of lazy mapDeps chunks.
     sem = asyncio.Semaphore(16)
+    visited: set[str] = set()
+    loaded, failed = 0, 0
 
     async def fetch(url: str) -> tuple[str, str | None]:
         async with sem:
@@ -275,23 +342,63 @@ async def _find_indices_url(scripts: list[str], clt: HttpClient) -> str:
                 logger.trace(f"XClId asset failed: {format_error(e)} - {url}")
                 return url, None
 
-    tasks = [asyncio.create_task(fetch(u)) for u in scripts]
-    loaded, failed = 0, 0
-    try:
-        for fut in asyncio.as_completed(tasks):
-            url, body = await fut
-            if body is None:
-                failed += 1
-                continue
+    for depth in range(_CRAWL_STATIC_DEPTH + 1):
+        budget = _CRAWL_MAX_ASSETS - len(visited)
+        if budget <= 0:
+            logger.trace(f"XClId asset crawl reached limit of {_CRAWL_MAX_ASSETS}")
+            break
 
-            loaded += 1
-            m = INDICES_FILE_RE.search(body)
-            if m:
-                return urljoin(url, m.group(0))
-    finally:
-        for t in tasks:
-            t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        batch: list[str] = []
+        for url in queue:
+            if url in visited:
+                continue
+            visited.add(url)
+            batch.append(url)
+            if len(batch) >= budget:
+                break
+        if not batch:
+            break
+
+        tasks = [asyncio.create_task(fetch(u)) for u in batch]
+        next_queue: list[str] = []
+        try:
+            for fut in asyncio.as_completed(tasks):
+                url, body = await fut
+                if body is None:
+                    failed += 1
+                    continue
+
+                loaded += 1
+                m = INDICES_FILE_RE.search(body)
+                if m:
+                    ref = urljoin(url, m.group(0))
+                    if _is_trusted_asset(ref, roots):
+                        return ref
+                    logger.trace(f"XClId ignored untrusted asset reference: {ref}")
+
+                if BOTOX_MARKER in body:
+                    m = BOTOX_SIGNER_REF_RE.search(body)
+                    if m:
+                        ref = urljoin(url, m.group(2))
+                        if _is_trusted_asset(ref, roots):
+                            return ref
+                        logger.trace(f"XClId ignored untrusted asset reference: {ref}")
+                    else:
+                        logger.trace(f"XClId botox marker without signer import: {url}")
+                    continue
+
+                if depth < _CRAWL_STATIC_DEPTH:
+                    next_queue.extend(_static_asset_refs(body, url, roots))
+        finally:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        queue = list(dict.fromkeys(next_queue))
+        remaining = _CRAWL_MAX_ASSETS - len(visited)
+        if len(queue) > remaining:
+            logger.trace(f"XClId static import crawl truncated to {remaining} assets")
+            queue = queue[:remaining]
 
     raise XClIdParseError(
         f"Signing script not found (assets: {loaded} loaded, {failed} failed). "
