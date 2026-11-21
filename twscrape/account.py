@@ -76,7 +76,10 @@ class Account(JSONTrait):
 
     def to_rs(self):
         rs = asdict(self)
-        rs["locks"] = json.dumps(rs["locks"], default=lambda x: x.isoformat())
+        rs["locks"] = json.dumps(
+            rs["locks"],
+            default=lambda dt: dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        )
         rs["stats"] = json.dumps(rs["stats"])
         rs["headers"] = json.dumps(rs["headers"])
         rs["cookies"] = json.dumps(rs["cookies"])

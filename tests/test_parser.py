@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Callable, cast
@@ -13,7 +14,11 @@ from twscrape.models import (
     AudiospaceCard,
     BroadcastCard,
     LiveEventCard,
+    MediaAnimated,
+    MediaPhoto,
+    MediaVideo,
     MessageMeCard,
+    ParseError,
     PeriscopeBroadcastCard,
     PollCard,
     PromoImageConvoCard,
@@ -24,11 +29,14 @@ from twscrape.models import (
     User,
     UserParseError,
     UserRef,
+    parse_about,
+    parse_community,
+    parse_trend,
     parse_tweet,
     parse_tweets,
     parse_user,
 )
-from twscrape.utils import find_obj, get_typed_object, to_old_rep
+from twscrape.utils import find_obj, get_or, get_typed_object, to_old_rep
 
 BASE_DIR = os.path.dirname(__file__)
 DATA_DIR = os.path.join(BASE_DIR, "mocked-data")
@@ -169,6 +177,9 @@ def check_tweet(doc: Tweet | None):
                 assert v.bitrate is not None
                 assert v.contentType is not None
 
+    for x in [*doc.media.photos, *doc.media.videos, *doc.media.animated]:
+        check_media(x)
+
     if doc.retweetedTweet is not None:
         try:
             assert doc.rawContent.endswith(doc.retweetedTweet.rawContent), "content should be full"
@@ -212,6 +223,40 @@ def check_user(doc: User):
     txt = doc.json()
     assert isinstance(txt, str)
     assert str(doc.id) in txt
+
+
+def check_media(doc: MediaPhoto | MediaVideo | MediaAnimated):
+    assert doc.shortUrl is None or re.fullmatch(r"https://t\.co/[A-Za-z0-9]+", doc.shortUrl)
+    assert doc.expandedUrl is None or re.fullmatch(
+        r"https://(twitter|x)\.com/\w+/status/\d+/(photo|video)/\d+", doc.expandedUrl
+    )
+    # a reused media links to the tweet that uploaded it
+    if doc.expandedUrl is not None and doc.sourceTweetId is not None:
+        assert f"/status/{doc.sourceTweetId}/" in doc.expandedUrl
+    assert isinstance(doc.id, int)
+    assert str(doc.id) == doc.id_str
+
+    # X sends the source tweet and its author together, or neither
+    assert (doc.sourceTweetId is None) == (doc.sourceUserId is None)
+    if doc.sourceTweetId is not None:
+        assert str(doc.sourceTweetId) == doc.sourceTweetIdStr
+        assert str(doc.sourceUserId) == doc.sourceUserIdStr
+    else:
+        assert doc.sourceTweetIdStr is None
+        assert doc.sourceUserIdStr is None
+
+    assert doc.altText is None or isinstance(doc.altText, str)
+
+    # X sends both dimensions together, or neither
+    assert (doc.width is None) == (doc.height is None)
+    if doc.width is not None and doc.height is not None:
+        assert doc.width > 0 and doc.height > 0
+
+
+def collect_tweets(doc: Tweet | None) -> list[Tweet]:
+    if doc is None:
+        return []
+    return [doc, *collect_tweets(doc.retweetedTweet), *collect_tweets(doc.quotedTweet)]
 
 
 def collect_tweet_users(doc: Tweet | None):
@@ -573,6 +618,109 @@ async def test_tweet_with_video():
         check_tweet(doc)
 
 
+def test_media_reused_from_another_tweet():
+    # the author pasted another tweet's video URL: X names that tweet and its author
+    tweets = {x.id: x for x in parse_tweets(fake_rep("manual_tweet_with_video_1").json())}
+    video = tweets[1671508600538161153].media.videos[0]
+    assert video.shortUrl == "https://t.co/XnC1A3Uk3J"
+    assert (
+        video.expandedUrl == "https://twitter.com/sz_mediagroup/status/1669691294183043074/video/1"
+    )
+    assert video.id == 1668857866328100864
+    assert video.id_str == "1668857866328100864"
+    assert video.sourceTweetId == 1669691294183043074
+    assert video.sourceTweetIdStr == "1669691294183043074"
+    assert video.sourceUserId == 1433745612537741318
+    assert video.sourceUserIdStr == "1433745612537741318"
+    assert video.altText is None
+    assert (video.width, video.height) == (1080, 1920)
+
+
+@pytest.mark.parametrize(
+    "fixture, twid, kind, media_id, short_url, size",
+    [
+        (
+            "manual_tweet_with_video_1",
+            1671885256914518017,
+            "photos",
+            1671885208583548935,
+            "https://t.co/BlksXCHXiM",
+            (455, 674),
+        ),
+        (
+            "manual_tweet_with_video_2",
+            1671753569412820992,
+            "videos",
+            1671753482821328896,
+            "https://t.co/1FyrDMxt16",
+            (720, 720),
+        ),
+    ],
+)
+def test_media_own_upload(fixture, twid, kind, media_id, short_url, size):
+    tweets = {x.id: x for x in parse_tweets(fake_rep(fixture).json())}
+    media = getattr(tweets[twid].media, kind)[0]
+    assert media.shortUrl == short_url
+    assert media.expandedUrl is not None
+    assert f"/status/{twid}/" in media.expandedUrl
+    assert media.id == media_id
+    assert media.id_str == str(media_id)
+    assert media.sourceTweetId is None
+    assert media.sourceTweetIdStr is None
+    assert media.sourceUserId is None
+    assert media.sourceUserIdStr is None
+    assert media.altText is None
+    assert (media.width, media.height) == size
+
+
+@pytest.mark.parametrize(
+    "fixture, kind, attr",
+    [
+        ("_retweet_with_photo", "photos", "sourceTweetId"),
+        ("manual_tweet_with_video_1", "videos", "sourceTweetId"),
+        ("manual_tweet_with_video_2", "videos", "sourceTweetId"),
+        ("_tweet_with_gif", "animated", "altText"),
+    ],
+)
+def test_media_field_coverage(fixture, kind, attr):
+    tweets = [x for t in parse_tweets(fake_rep(fixture).json()) for x in collect_tweets(t)]
+    medias = [x for t in tweets for x in getattr(t.media, kind)]
+    for x in medias:
+        check_media(x)
+    assert any(getattr(x, attr) for x in medias)
+
+
+def recorded_media():
+    # every media of every recorded tweet, with its tweet and the tweet's raw legacy object
+    items = []
+    for name in sorted(os.listdir(DATA_DIR)):
+        raw = fake_rep(name).json()
+        objs = to_old_rep(raw)["tweets"]
+        for doc in (x for t in parse_tweets(raw) for x in collect_tweets(t)):
+            for x in [*doc.media.photos, *doc.media.videos, *doc.media.animated]:
+                items.append((objs[doc.id_str], doc, x))
+    assert len(items) > 0
+    return items
+
+
+def test_media_short_url_in_tweet_text():
+    # X appends the media's t.co to the legacy text; a long tweet's rawContent is its note text,
+    # which carries no attachment link
+    for obj, doc, x in recorded_media():
+        assert x.shortUrl is not None
+        assert x.shortUrl in obj["full_text"]
+        if "note_tweet" not in obj:
+            assert x.shortUrl in doc.rawContent
+
+
+def test_media_dimensions_on_every_recorded_media():
+    for _, _, x in recorded_media():
+        check_media(x)
+        assert x.expandedUrl is not None
+        assert x.width is not None
+        assert x.height is not None
+
+
 async def test_issue_28():
     api = get_api()
 
@@ -899,6 +1047,342 @@ def test_user_lookup_parse_failure_keeps_cause():
         parse_user(raw)
 
     assert isinstance(exc.value.__cause__, ValueError)
+
+
+def _find_tweet(raw: dict, fn: Callable[[str], bool]) -> dict:
+    tw = find_obj(raw, lambda x: x.get("__typename") == "Tweet" and fn(x["rest_id"]))
+    assert tw is not None
+    return tw
+
+
+def _bad_date(tw: dict):
+    tw["legacy"]["created_at"] = "not a date"
+
+
+def _no_rest_id(tw: dict):
+    del tw["rest_id"]
+
+
+def _no_legacy(tw: dict):
+    del tw["legacy"]
+
+
+def _null_quote(tw: dict):
+    tw["quoted_status_result"] = None
+
+
+def _wrapped_without_tweet(tw: dict):
+    tw.clear()
+    tw["__typename"] = "TweetWithVisibilityResults"
+
+
+def _wrapped_without_legacy(tw: dict):
+    inner = {"rest_id": tw["rest_id"]}
+    tw.clear()
+    tw.update({"__typename": "TweetWithVisibilityResults", "tweet": inner})
+
+
+def _trend_without_name(tw: dict):
+    tw.clear()
+    tw["__typename"] = "TimelineTrend"
+
+
+def _unknown_typename(tw: dict):
+    tw["__typename"] = "SomethingNew"
+
+
+@pytest.mark.parametrize(
+    "breaks, cause",
+    [
+        (_bad_date, ValueError),
+        (_no_rest_id, KeyError),
+        (_no_legacy, ValueError),
+        (_null_quote, TypeError),
+        (_wrapped_without_tweet, KeyError),
+        (_wrapped_without_legacy, ValueError),
+        (_unknown_typename, ValueError),
+    ],
+)
+def test_tweet_lookup_parse_failure_raises(monkeypatch, breaks, cause):
+    # https://github.com/vladkens/twscrape/issues/348
+    dumps = []
+    monkeypatch.setattr(models, "_write_dump", lambda *args: dumps.append(args))
+
+    twid = 1649191520250245121
+    raw = fake_rep("raw_tweet_details").json()
+    breaks(_find_tweet(raw, lambda x: x == str(twid)))
+
+    with pytest.raises(ParseError, match=f"Failed to parse tweet {twid}") as exc:
+        parse_tweet(raw, twid)
+
+    assert isinstance(exc.value.__cause__, cause)
+    assert len(dumps) == 1
+
+
+@pytest.mark.parametrize(
+    "breaks",
+    [
+        _bad_date,
+        _no_rest_id,
+        _no_legacy,
+        _null_quote,
+        _wrapped_without_tweet,
+        _wrapped_without_legacy,
+        _trend_without_name,
+    ],
+)
+def test_tweet_lookup_ignores_broken_reply(breaks):
+    twid = 1649191520250245121
+    raw = fake_rep("raw_tweet_details").json()
+    expected = parse_tweet(raw, twid)
+    breaks(_find_tweet(raw, lambda x: x != str(twid)))
+
+    doc = parse_tweet(raw, twid)
+    assert doc is not None and doc == expected
+    assert parse_tweet(raw, 1) is None  # not in the response
+
+
+def test_tweet_lookup_keeps_related_objects_of_target():
+    raw = fake_rep("raw_search").json()
+    tw = find_obj(raw, lambda x: x.get("__typename") == "Tweet" and "quoted_status_result" in x)
+    assert tw is not None
+
+    twid = int(tw["rest_id"])
+    expected = parse_tweet(raw, twid)
+    assert expected is not None and expected.quotedTweet is not None
+
+    raw["data"]["broken"] = [
+        {"__typename": "Tweet", "legacy": {}},
+        {"__typename": "TweetWithVisibilityResults"},
+        {"__typename": "TimelineTrend"},
+    ]
+    assert parse_tweet(raw, twid) == expected
+
+    # paginated parsers still fail the page
+    with pytest.raises(KeyError):
+        list(parse_tweets(raw))
+
+
+def _target_results(raw: dict, twid: int) -> dict:
+    entry = find_obj(raw, lambda x: x.get("entryId") == f"tweet-{twid}")
+    item = find_obj(entry, lambda x: "tweet_results" in x)
+    assert item is not None
+    return item["tweet_results"]
+
+
+@pytest.mark.parametrize(
+    "results",
+    [
+        {},
+        {"result": None},
+        {"result": {"__typename": "TweetTombstone", "tombstone": {"__typename": "TextTombstone"}}},
+        {"result": {"__typename": "TweetUnavailable"}},
+    ],
+)
+def test_tweet_lookup_unavailable_returns_none(results):
+    twid = 1649191520250245121
+    raw = fake_rep("raw_tweet_details").json()
+    tweet_results = _target_results(raw, twid)
+    tweet_results.clear()
+    tweet_results.update(results)
+    assert parse_tweet(raw, twid) is None
+
+    # a bare reference from another tweet doesn't make the requested tweet exist
+    raw["data"]["ref"] = {
+        "quotedRefResult": {"result": {"__typename": "Tweet", "rest_id": str(twid)}}
+    }
+    assert parse_tweet(raw, twid) is None
+
+
+@pytest.mark.parametrize("tweet", ["broken", ["broken"]])
+def test_tweet_lookup_ignores_non_object_visibility_tweet(tweet):
+    twid = 1649191520250245121
+    raw = fake_rep("raw_tweet_details").json()
+    expected = parse_tweet(raw, twid)
+
+    # without its entry the target is found by rest_id, after the broken object
+    entry = find_obj(raw, lambda x: x.get("entryId") == f"tweet-{twid}")
+    assert entry is not None
+    entry["entryId"] = "other"
+    raw["data"] = {
+        "broken": {"__typename": "TweetWithVisibilityResults", "tweet": tweet},
+        **raw["data"],
+    }
+
+    assert parse_tweet(raw, twid) == expected
+    assert parse_tweet(raw, 1) is None
+
+
+def test_tweet_lookup_non_object_result_raises():
+    twid = 1649191520250245121
+    raw = fake_rep("raw_tweet_details").json()
+    _target_results(raw, twid)["result"] = ["broken"]
+
+    with pytest.raises(ParseError, match="broken"):
+        parse_tweet(raw, twid)
+
+
+def _find_quoting_tweet(raw: dict, fn: Callable[[dict], bool] = lambda x: True) -> dict:
+    tw = find_obj(
+        raw,
+        lambda x: (
+            x.get("__typename") == "Tweet"
+            and get_or(x, "quoted_status_result.result.__typename") == "Tweet"
+            and fn(x["quoted_status_result"]["result"])
+        ),
+    )
+    assert tw is not None
+    return tw
+
+
+@pytest.mark.parametrize(
+    "breaks, cause",
+    [
+        (_bad_date, ValueError),
+        (_no_rest_id, KeyError),
+        (_null_quote, TypeError),
+        (_wrapped_without_tweet, KeyError),
+    ],
+)
+def test_tweet_lookup_broken_nested_tweet_raises(monkeypatch, breaks, cause):
+    dumps = []
+    monkeypatch.setattr(models, "_write_dump", lambda *args: dumps.append(args))
+
+    raw = fake_rep("raw_search").json()
+    tw = _find_quoting_tweet(raw)
+    twid = int(tw["rest_id"])
+
+    # X can also list the quoted tweet on its own: a healthy copy would hide a bad date
+    qtid = tw["quoted_status_result"]["result"]["rest_id"]
+    for x in get_typed_object(raw, defaultdict(list))["Tweet"]:
+        if x["rest_id"] == qtid:
+            breaks(x)
+
+    with pytest.raises(ParseError, match=f"Failed to parse tweet {twid}") as exc:
+        parse_tweet(raw, twid)
+
+    assert isinstance(exc.value.__cause__, cause)
+    assert len(dumps) == 1
+
+
+def test_tweet_lookup_skips_nested_tweet_without_legacy():
+    raw = fake_rep("raw_search").json()
+    tw = _find_quoting_tweet(raw)
+    twid = int(tw["rest_id"])
+
+    qtid = tw["quoted_status_result"]["result"]["rest_id"]
+    for x in get_typed_object(raw, defaultdict(list))["Tweet"]:
+        if x["rest_id"] == qtid:
+            _no_legacy(x)
+
+    doc = parse_tweet(raw, twid)
+    assert doc is not None
+    assert doc.quotedTweet is None
+    assert doc.quotedTweetIdStr == qtid
+
+
+def test_tweet_lookup_keeps_nested_ref():
+    # quotedRefResult holds a bare {__typename, rest_id}: no legacy, and not a failure
+    raw = fake_rep("raw_list_timeline").json()
+    tw = _find_quoting_tweet(raw, lambda x: "quotedRefResult" in x)
+    twid = int(tw["rest_id"])
+
+    doc = parse_tweet(raw, twid)
+    assert doc is not None and doc.quotedTweet is not None
+
+
+SINGLE_PARSERS = {
+    "about": ("raw_user_about", "user_result_by_screen_name", "about_profile", parse_about),
+    "community": ("raw_community_info", "communityResults", "rest_id", parse_community),
+}
+
+
+@pytest.mark.parametrize("name, key, field, parse", SINGLE_PARSERS.values(), ids=SINGLE_PARSERS)
+def test_single_object_parse_failure_raises(name, key, field, parse):
+    # https://github.com/vladkens/twscrape/issues/348
+    raw = fake_rep(name).json()
+    raw["data"][key]["result"][field] = ["broken"]
+    with pytest.raises(ParseError, match="Failed to parse"):
+        parse(raw)
+
+
+@pytest.mark.parametrize("name, key, field, parse", SINGLE_PARSERS.values(), ids=SINGLE_PARSERS)
+def test_single_object_unknown_typename_raises(monkeypatch, name, key, field, parse):
+    dumps = []
+    monkeypatch.setattr(models, "_write_dump", lambda *args: dumps.append(args))
+
+    raw = fake_rep(name).json()
+    raw["data"][key]["result"]["__typename"] = "SomethingNew"
+    with pytest.raises(ParseError, match="SomethingNew") as exc:
+        parse(raw)
+
+    assert isinstance(exc.value.__cause__, ValueError)
+    assert len(dumps) == 1
+
+
+SUSPENDED_USER = {"__typename": "UserUnavailable", "unavailable_reason": "Suspended"}
+UNKNOWN_COMMUNITY = {"__typename": "CommunityUnavailable", "reason": "Unavailable"}
+
+
+@pytest.mark.parametrize(
+    "data, parse",
+    [
+        ({}, parse_about),  # missing or deactivated account
+        ({"user_result_by_screen_name": {}}, parse_about),
+        ({"user_result_by_screen_name": {"id": "1", "result": SUSPENDED_USER}}, parse_about),
+        ({}, parse_community),
+        ({"communityResults": {}}, parse_community),
+        ({"communityResults": {"id": "1", "result": UNKNOWN_COMMUNITY}}, parse_community),
+    ],
+)
+def test_unavailable_single_object_returns_none(data, parse):
+    assert parse({"data": data}) is None
+
+
+@pytest.mark.parametrize("name, key, field, parse", SINGLE_PARSERS.values(), ids=SINGLE_PARSERS)
+@pytest.mark.parametrize("data", [lambda key: None, lambda key: {key: None}])
+def test_single_object_null_parent_returns_none(data, name, key, field, parse):
+    assert parse({"data": data(key)}) is None
+    assert parse({"data": {key: {"result": None}}}) is None
+
+
+@pytest.mark.parametrize("name, key, field, parse", SINGLE_PARSERS.values(), ids=SINGLE_PARSERS)
+@pytest.mark.parametrize(
+    "data",
+    [lambda key: ["broken"], lambda key: {key: ["broken"]}, lambda key: {key: {"result": ["x"]}}],
+)
+def test_single_object_non_object_raises(monkeypatch, data, name, key, field, parse):
+    dumps = []
+    monkeypatch.setattr(models, "_write_dump", lambda *args: dumps.append(args))
+
+    with pytest.raises(ParseError, match="Failed to parse") as exc:
+        parse({"data": data(key)})
+
+    assert isinstance(exc.value.__cause__, AttributeError)
+    assert len(dumps) == 1
+
+
+def test_trend_parse_failure_raises(monkeypatch):
+    def fail(*args):
+        raise ValueError("broken trend")
+
+    monkeypatch.setattr(models.Trend, "parse", fail)
+    with pytest.raises(ParseError, match="Failed to parse trend") as exc:
+        parse_trend(fake_rep("raw_trends").json())
+
+    assert isinstance(exc.value.__cause__, ValueError)
+
+
+def test_trend_without_name_raises():
+    raw = fake_rep("raw_trends").json()
+    trend = find_obj(raw, lambda x: x.get("__typename") == "TimelineTrend")
+    assert trend is not None
+    del trend["name"]
+
+    with pytest.raises(ParseError, match="Failed to parse trend") as exc:
+        parse_trend(raw)
+
+    assert isinstance(exc.value.__cause__, KeyError)
 
 
 def test_bot_reply_to_partial_only_operator():

@@ -6,7 +6,7 @@ import json
 import pytest
 
 from tests.test_parser import fake_rep
-from twscrape import ApiError, UserParseError, XClIdParseError, cli
+from twscrape import ApiError, ParseError, UserParseError, XClIdParseError, cli
 
 DUMMY_DSN = "mysql://u:p@127.0.0.1:3306/test"
 
@@ -71,6 +71,7 @@ def test_reactivate_command(db_dsn, monkeypatch):
         ApiError("API error: 200 - UserByRestId - (-1) Dependency: Unspecified"),
         XClIdParseError("Signing script not found"),
         UserParseError("Failed to parse user 123"),
+        ParseError("Failed to parse tweet 123"),
     ],
 )
 def test_request_error_exits_with_one_line(tmp_path, monkeypatch, error):

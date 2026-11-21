@@ -463,7 +463,9 @@ class QueueClient:
         if self.debug:
             dump_rep(rep)
 
-        if "text/html" in rep.headers.get("content-type", "") and rep.status_code >= 400:
+        html_error = "text/html" in rep.headers.get("content-type", "") and rep.status_code >= 400
+        rate_limited_429 = rep.status_code == 429
+        if html_error:
             src = "Cloudflare" if "cf-ray" in rep.headers else "HTML"
             retry_after = retry_after_seconds(rep)
             msg = f"Blocked by {src}: {rep.status_code} - {req_id(rep)} - {retry_after}"
@@ -473,7 +475,7 @@ class QueueClient:
                 msg += "; retry with TWS_HTTP_BACKEND=curl or unset it"
 
             logger.warning(msg)
-            if rep.status_code == 429:
+            if rate_limited_429:
                 # Edge rate limit, not an account problem: back off and retry same account
                 raise BlockedError(msg, retry_after)
             raise AbortReqError(msg)
@@ -511,12 +513,21 @@ class QueueClient:
             raise HandledError()
 
         # no way to check is account banned in direct way, but this check should work
-        if has_error(errors, "(88) Rate limit exceeded") and limit_remaining > 0:
+        rate_limited = has_error(errors, "(88) Rate limit exceeded") and not has_data(rep, res)
+        if rate_limited and limit_remaining > 0 and not rate_limited_429:
             logger.warning(f"Ban detected: {request_log}")
             await self._close_ctx(-1, inactive=True, msg=err_msg)
             raise HandledError()
 
-        if has_error(errors, "(326) Authorization: Denied by access control"):
+        # rate limit without x-rate-limit-* headers: https://github.com/vladkens/twscrape/issues/351
+        if rate_limited_429 or rate_limited:
+            logger.debug(f"Rate limited: {request_log}")
+            await self._close_ctx(limit_reset if limit_reset > utc.ts() else utc.ts() + 60 * 15)
+            raise HandledError()
+
+        # https://github.com/vladkens/twscrape/issues/211
+        suspended = has_error(errors, "(64) Your account is suspended")
+        if suspended or has_error(errors, "(326) Authorization: Denied by access control"):
             logger.warning(f"Ban detected: {request_log}")
             await self._close_ctx(-1, inactive=True, msg=err_msg)
             raise HandledError()

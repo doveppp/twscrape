@@ -137,6 +137,30 @@ async def test_get_for_queue(pool_mock: AccountsPool):
     assert acc is None
 
 
+async def test_get_for_queue_accepts_expired_lock_after_save(pool_mock: AccountsPool):
+    queue = "SearchTimeline"
+    await pool_mock.add_account_cookies("user1", "auth_token=token; ct0=csrf")
+    await pool_mock.lock_until("user1", queue, utc.ts() - 60)
+    acc = await pool_mock.get("user1")
+    await pool_mock.save(acc)
+
+    assert (await pool_mock.get("user1")).last_used == acc.last_used
+    assert (await pool_mock.stats())[f"locked_{queue}"] == 0
+    assert await pool_mock.get_for_queue(queue) is not None
+
+
+async def test_get_for_queue_preserves_future_lock_after_save(pool_mock: AccountsPool):
+    queue = "SearchTimeline"
+    await pool_mock.add_account_cookies("user1", "auth_token=token; ct0=csrf")
+    deadline = utc.ts() + 3600
+    await pool_mock.lock_until("user1", queue, deadline)
+    await pool_mock.save(await pool_mock.get("user1"))
+
+    assert (await pool_mock.stats())[f"locked_{queue}"] == 1
+    assert await pool_mock.get_for_queue(queue) is None
+    assert int((await pool_mock.get("user1")).locks[queue].timestamp()) == deadline
+
+
 async def test_account_unlock(pool_mock: AccountsPool):
     Q = "test_queue"
 

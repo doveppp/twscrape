@@ -233,7 +233,7 @@ Trends:
 await gather(api.trends("news"))  # list[Trend]
 await gather(api.trends("sport"))  # list[Trend]
 await gather(api.trends("entertainment"))  # list[Trend]
-await gather(api.trends("VGltZWxpbmU6DAC2CwABAAAACHRyZW5kaW5nAAA"))  # list[Trend]
+await gather(api.trends("VGltZWxpbmU6DAC2CwABAAAACHRyZW5kaW5nAAA="))  # list[Trend]
 ```
 
 Parsed `Tweet`, `User`, `Community`, and trend objects can be converted with `.dict()` or `.json()`.
@@ -245,9 +245,9 @@ A failed request raises instead of looking like an empty result:
 - `AbortReqError` when twscrape gives up on a request, for example on an HTML block page, including `GqlFeaturesOutdatedError` when X requires GraphQL features twscrape can't enable
 - `ApiError`, its subclass, when X answers with errors and no data; a busy or timed-out X (`LoadShed`, `DeadlineExceeded`) is retried a few times first
 - `XClIdParseError` when the X client transaction ID can't be generated
-- `UserParseError` when `user_by_id()` or `user_by_login()` gets a user twscrape can't parse
+- `ParseError` when `tweet_details()`, `user_about()` or `community_info()` gets the requested object but twscrape can't parse it; its subclass `UserParseError` for `user_by_id()` and `user_by_login()`
 
-A paginated method raises on the page that failed, after yielding the earlier pages. `None` from `user_by_id()` or `user_by_login()` means X has no such user (or no account was available and `raise_when_no_account` is off). In the CLI, a failed request exits with code 1 without a traceback.
+A paginated method raises on the page that failed, after yielding the earlier pages, and skips single items it can't parse. `None` from `tweet_details()`, `user_by_id()`, `user_by_login()`, `user_about()` or `community_info()` means X has no such object (or no account was available and `raise_when_no_account` is off). In the CLI, a failed request exits with code 1 without a traceback.
 
 ## CLI
 

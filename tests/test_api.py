@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 from typing import Any
@@ -204,6 +205,26 @@ async def test_search_only_passes_check_search_to_queue_client(api_mock: API, mo
         ("UserByRestId", None),
         ("SearchTimeline", api_mock.check_search),
     ]
+
+
+async def test_trends_timeline_ids(api_mock: API, monkeypatch):
+    # X answers an unpadded timelineId with "(-1) Internal server error"
+    sent = []
+
+    def mock_gql_items(*a, **kw):
+        sent.append(a[1]["timelineId"])
+        raise MockedError()
+
+    monkeypatch.setattr(api_mock, "_gql_items", mock_gql_items)
+    tabs = ("trending", "news", "sport", "entertainment")
+    for tab in tabs:
+        with pytest.raises(MockedError):
+            await gather(api_mock.trends(tab))
+
+    for tab, timeline_id in zip(tabs, sent):
+        assert len(timeline_id) % 4 == 0, f"{tab}: {timeline_id} is not padded"
+        decoded = base64.b64decode(timeline_id, validate=True)
+        assert decoded.startswith(b"Timeline:") and tab.encode() in decoded, tab
 
 
 async def test_article_rich_content_only_in_tweet_details(api_mock: API, monkeypatch):
