@@ -13,8 +13,11 @@ modules.
 
 An unrelated asset failure, such as an unavailable chat manifest, does not stop
 discovery when another resource identifies the signing module. If discovery
-fails, `XClIdParseError` remains a parsing failure, not evidence that an account
-cannot search. Do not set `can_search=false` based on this error alone.
+fails during a queued request, `XClIdParseError` counts toward the account's
+transaction-ID failure limit. The queue rotates accounts after a 15-minute
+global cooldown is recorded for the failed account. The third consecutive
+failure deactivates the account. Search availability (`can_search`) is tracked
+separately.
 
 Enable TRACE on the logging sink to see individual asset failures. The final
 error includes discovery counters; those counters describe scanned resources,

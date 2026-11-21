@@ -1307,8 +1307,9 @@ async def test_xclid_account_error_locks_queue_and_rotates(pool_mock: AccountsPo
     await client.__aexit__(None, None, None)
 
 
-async def test_xclid_parse_error_aborts_without_account_state_change(
-    pool_mock: AccountsPool, monkeypatch
+@pytest.mark.parametrize("prior_failures", [0, 2])
+async def test_xclid_parse_error_is_counted_and_raised_without_another_account(
+    pool_mock: AccountsPool, monkeypatch, prior_failures
 ):
     mock = MockClient()
     monkeypatch.setattr(Account, "make_client", lambda self, proxy=None: mock)
@@ -1320,6 +1321,9 @@ async def test_xclid_parse_error_aborts_without_account_state_change(
         proxy="http://secret:password@127.0.0.1:7897",
         cookies="auth_token=token1; ct0=csrf1",
     )
+    pool_mock._wait_timeout = 0
+    for _ in range(prior_failures):
+        await pool_mock.incr_fail_count("user1", "xclid")
     messages = []
 
     async def fake_get(cls, username, proxy=None, cookies=None, fresh=False):
@@ -1333,8 +1337,15 @@ async def test_xclid_parse_error_aborts_without_account_state_change(
         await client.get(URL)
 
     user1 = await pool_mock.get("user1")
-    assert user1.active is True
-    assert "SearchTimeline" not in user1.locks
+    if prior_failures == 0:
+        assert user1.active is True
+        assert user1.xclid_fail_count == 1
+        assert user1.global_locked_until is not None
+        assert int(user1.global_locked_until.timestamp()) > utc.ts() + 60 * 14
+    else:
+        assert user1.active is False
+        assert "Signing script not found" in (user1.error_msg or "")
+    assert user1.can_search is None
     assert len(messages) == 1
     assert "Signing script not found (3/3 assets loaded)" in messages[0]
     assert "username=user1" in messages[0]
@@ -1342,6 +1353,25 @@ async def test_xclid_parse_error_aborts_without_account_state_change(
     assert "backend=unknown" in messages[0]
     assert "proxy=True" in messages[0]
     assert "secret" not in messages[0]
+
+
+async def test_xclid_parse_error_rotates_and_retries_request(client_fixture: CF, monkeypatch):
+    pool, client, mock = client_fixture
+    original_get = XClIdGenStore.get.__func__
+
+    async def fake_get(cls, username, proxy=None, cookies=None, fresh=False):
+        if username == "user1":
+            raise XClIdParseError("Signing script not found")
+        return await original_get(cls, username, proxy, cookies, fresh)
+
+    monkeypatch.setattr(XClIdGenStore, "get", classmethod(fake_get))
+    mock.add_response(json={"ok": True})
+
+    async with client:
+        rep = await client.get(URL)
+
+    assert getattr(rep, "__username") == "user2"
+    assert (await pool.get("user1")).xclid_fail_count == 1
 
 
 # --- MySQL integration: edge limits and account health ---

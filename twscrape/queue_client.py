@@ -30,9 +30,9 @@ SearchCheckFn = Callable[[str], Awaitable[dict[str, str | bool | None]]]
 MISSING_FEATURES_RE = re.compile(r"The following features cannot be null: ([^;]+)")
 TMP_TS = utc.now().isoformat().split(".")[0].replace("T", "_").replace(":", "-")[0:16]
 
-# Per-request cap: how many accounts may hit XClId 404 exhaustion before aborting.
+# Per-request cap on account transaction-id failures.
 MAX_XCLID_FAILED_ACCOUNTS = 10
-# Consecutive XClIdRetryExhaustedError per account before deactivating it.
+# Consecutive transaction-id failures per account before deactivating it.
 XCLID_FAIL_DEACTIVATE_THRESHOLD = 3
 # Lock duration applied to an account on each XClIdRetryExhaustedError (seconds).
 XCLID_FAIL_LOCK_SECONDS = 1 * 60
@@ -40,7 +40,7 @@ XCLID_FAIL_LOCK_SECONDS = 1 * 60
 UNKNOWN_FAIL_DEACTIVATE_THRESHOLD = 3
 # Lock duration applied to an account on each unknown error (seconds).
 UNKNOWN_FAIL_LOCK_SECONDS = 60 * 15
-# Lock duration applied when X serves a logged-out web build (seconds).
+# Lock duration applied for logged-out sessions or signing parse failures (seconds).
 XCLID_ACCOUNT_FAIL_LOCK_SECONDS = 60 * 15
 # Upper bound for honouring a Retry-After header on an edge (Cloudflare) rate limit.
 BLOCKED_MAX_SLEEP_SECONDS = 60 * 10
@@ -581,6 +581,7 @@ class QueueClient:
 
         features_retried = False
         self._xclid_failed_accounts = 0
+        signing_error: XClIdParseError | None = None
         search_failed: set[str] = set()
         # At most one signing-store recovery per req() call; the probe result is
         # kept so a repeated failure on the same account is not probed again.
@@ -596,6 +597,8 @@ class QueueClient:
                     raise AbortReqError(
                         "No searchable account left after confirmed search failures"
                     )
+                if signing_error is not None:
+                    raise signing_error
                 return None
 
             if not has_required_cookies(ctx.acc.cookies):
@@ -725,8 +728,9 @@ class QueueClient:
                     f"{self._format_ctx_error(ctx, e)}; "
                     "Report: https://github.com/vladkens/twscrape/issues"
                 )
-                await self._close_ctx()
-                raise
+                signing_error = e
+                await self._xclid_failure(ctx, e, XCLID_ACCOUNT_FAIL_LOCK_SECONDS)
+                continue
             except (NetworkError, ConnectError) as e:
                 # transport failed, retry same account with backoff, then cool it down and rotate
                 if await ctx.retry(FailKind.TRANSPORT):
