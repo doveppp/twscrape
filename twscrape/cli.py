@@ -235,7 +235,7 @@ def run():
     reactivate.add_argument("usernames", nargs="+", default=[], help="Usernames to reactivate")
 
     check_search = subparsers.add_parser(
-        "check_search", help="Probe one account and update can_search"
+        "check_search", help="Probe one account and deactivate it if search is unavailable"
     )
     check_search.add_argument("username", help="Local account identifier to probe")
 

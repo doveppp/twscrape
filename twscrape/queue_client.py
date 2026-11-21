@@ -230,16 +230,12 @@ def search_failure_reason(rep: Response) -> str | None:
 def search_check_outcome(
     reason: str, probe: dict[str, str | bool | None], replayed: bool
 ) -> ApiError:
-    """Describe a search failure the account check did not resolve.
-
-    Only a persisted (updated) answer is a decision; anything else proves
-    nothing about the route, so it aborts instead of rotating the account.
-    """
+    """Describe a search failure the account check did not resolve."""
     detail = (
         f"updated={probe.get('updated')}, can_search={probe.get('can_search')}, "
         f"reason={probe.get('reason', 'unknown')}"
     )
-    if probe.get("updated") is True and probe.get("can_search") is True:
+    if probe.get("can_search") is True:
         replay = "an identical replay on the same account also failed" if replayed else ""
         return ApiError(
             f"Search failed ({reason}) but the account check passed ({detail})"
@@ -645,8 +641,7 @@ class QueueClient:
                     except Exception as e:
                         raise _SearchCheckError(e) from e
 
-                    # A confirmed route failure rotates the account without
-                    # touching its health counters.
+                    # The probe deactivated the account after confirming the failure.
                     if probe.get("updated") is True and probe.get("can_search") is False:
                         search_failed.add(username)
                         logger.warning(
@@ -659,11 +654,7 @@ class QueueClient:
                     # The account answered a search, so the failure is not a
                     # confirmed account limitation: invalidate the signing
                     # store and replay the request once on this account.
-                    if (
-                        probe.get("updated") is True
-                        and probe.get("can_search") is True
-                        and recovered is None
-                    ):
+                    if probe.get("can_search") is True and recovered is None:
                         recovered, recovered_probe = username, probe
                         XClIdGenStore.items.pop(username, None)
                         logger.info(

@@ -460,16 +460,7 @@ class API:
             await clt.aclose()
 
     async def check_search(self, username: str) -> dict[str, str | bool | None]:
-        """Probe SearchTimeline for one account and persist the result.
-
-        Reads the named account directly, including inactive and already marked
-        accounts, without taking a pool slot or touching locks/stats/failure
-        counters. A decision is stored only after two identical known failures
-        (empty HTTP 404 or HTTP 200 "Internal server error" with no data) or a
-        valid page with tweets. Repeated failures describe availability now and
-        can still reflect an endpoint-wide issue, so recheck later; False is not
-        a permanent suspension. Every other answer leaves can_search unchanged.
-        """
+        """Probe one account and deactivate it after two matching known search failures."""
         acc = await self.pool.get_account(username)
         if acc is None:
             return {
@@ -498,20 +489,12 @@ class API:
                 "reason": type(e).__name__,
             }
 
-        if kind == "inconclusive":
-            return {
-                "username": username,
-                "can_search": None,
-                "updated": False,
-                "reason": reason,
-            }
-
-        can_search = kind == "positive"
-        await self.pool.set_can_search(username, can_search)
+        if kind == "negative":
+            await self.pool.mark_inactive(username, f"Search unavailable ({reason})", tx=acc._tx)
         return {
             "username": username,
-            "can_search": can_search,
-            "updated": True,
+            "can_search": {"positive": True, "negative": False}.get(kind),
+            "updated": kind == "negative",
             "reason": reason,
         }
 

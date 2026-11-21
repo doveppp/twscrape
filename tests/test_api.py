@@ -86,9 +86,8 @@ GQL_GEN = [
 ]
 
 
-async def test_check_search_persists_result_without_changing_account_health(api_http):
+async def test_check_search_success_and_inconclusive_leave_account_unchanged(api_http):
     api, mock = api_http
-    await api.pool.set_can_search("user1", False)
     await api.pool._db.execute(
         "UPDATE accounts SET _tx = 'existing-lease', xclid_fail_count = 2, "
         "global_locked_until = '2099-01-01 00:00:00' WHERE username = 'user1'"
@@ -99,8 +98,7 @@ async def test_check_search_persists_result_without_changing_account_health(api_
     result = await api.check_search("user1")
 
     assert result["can_search"] is True
-    assert result["updated"] is True
-    before["can_search"] = True
+    assert result["updated"] is False
     assert (await api.pool.get("user1")).to_rs() == before
 
     mock.add_response(status_code=429)
@@ -145,15 +143,14 @@ async def test_search_auto_probe_rotates_and_replays_original_request(api_http, 
     assert [x["rawQuery"] for x in variables[1:3]] == ["hello", "hello"]
 
     user1 = await api.pool.get("user1")
-    assert user1.can_search is False
-    assert user1.active is True
+    assert user1.active is False
+    assert "Search unavailable" in (user1.error_msg or "")
     assert user1.global_locked_until is None
     assert user1.xclid_fail_count == 0
     assert user1.unknown_fail_count == 0
-    assert user1.locks == {}
+    assert user1._tx is None
 
     user2 = await api.pool.get("user2")
-    assert user2.can_search is None
     assert user2.active is True
     assert user2.locks == {}
 

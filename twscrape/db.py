@@ -94,7 +94,19 @@ async def _migration_v3(cur):
         await cur.execute("ALTER TABLE accounts ADD COLUMN can_search TINYINT DEFAULT NULL")
 
 
-MIGRATIONS = [_migration_v1, _migration_v2, _migration_v3]
+async def _migration_v4(cur):
+    """Convert search restrictions into account deactivation."""
+    await cur.execute("SHOW COLUMNS FROM accounts LIKE 'can_search'")
+    if await cur.fetchone() is None:
+        return
+    await cur.execute(
+        "UPDATE accounts SET active = 0, _tx = NULL, error_msg = 'Search unavailable' "
+        "WHERE can_search = 0 AND active = 1"
+    )
+    await cur.execute("ALTER TABLE accounts DROP COLUMN can_search")
+
+
+MIGRATIONS = [_migration_v1, _migration_v2, _migration_v3, _migration_v4]
 
 
 async def migrate(pool: Pool) -> None:

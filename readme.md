@@ -358,18 +358,13 @@ user2     True       True    2023-05-20 03:25:45  120        None
 user3     False      False   None                 120        Login error
 ```
 
-The account list also exposes `can_search`: `None` means untested, `True` means
-searchable, and `False` excludes the account from `SearchTimeline` only. Other
-endpoints still use it if active. Record a probe result with
-`await api.pool.set_can_search("user1", False)`; use `True` after a successful
-recheck or `None` to clear the result. This flag is only updated by a probe,
-never by an empty result, and is not reset by login, cookie updates, or reactivation.
-Existing databases gain the nullable column automatically on first use; the
-database user needs `ALTER` permission for this upgrade.
+On first use, existing databases migrate accounts with `can_search=0` to
+inactive and remove the old `can_search` column. The database user needs
+`ALTER` permission for this upgrade.
 
 ### Check whether an account can search
 
-Probe a specific account and save the result to `can_search`:
+Probe a specific account, including an inactive one:
 
 ```bash
 # Uses TWS_DB, or pass --db before the command.
@@ -381,23 +376,21 @@ result = await api.check_search("user1")
 print(result)  # username, can_search, updated, reason
 ```
 
-This also rechecks accounts already marked `can_search=False` or inactive; it
-does not rotate to another account or change `active`, locks, or failure counts.
-It checks one page of a broad `hello` search, retrying once with a fresh
-transaction ID when it sees a known search failure. Actual tweet data confirms
-`True`; two empty-body 404s or two data-less `Internal server error` responses
-record `False`. These failures describe current availability, not a permanent
-ban, and can also occur during endpoint-wide problems.
+The probe checks one page of a broad `hello` search and retries known search
+failures once with a fresh transaction ID. Tweet data returns `can_search=True`
+without changing the account. Two empty-body 404s or two data-less `Internal
+server error` responses return `can_search=False` and deactivate the account for
+all queues. These probe failures can also occur during endpoint-wide problems.
 
 Empty results, rate limits, authentication errors, invalid responses, and network
-or signing failures return `can_search=None, updated=False` and leave the stored
-flag unchanged. The network probe has a 30-second timeout. A database write
+or signing failures return `can_search=None, updated=False`. The network probe
+has a 30-second timeout. A database write
 failure raises instead of reporting a successful update.
 
 API searches automatically call `check_search` for the account that returns an
 empty-body 404 or a data-less `Internal server error`. If the probe confirms
-`False`, the account is excluded from search and the original query/page is
-retried with another account, without deactivating it or adding a global lock.
+`False`, the account is deactivated and the original query/page is retried with
+another account.
 At most ten confirmed failures are handled per request. A successful `hello`
 probe allows one retry of the original query/page on the same account. If that
 retry fails again, or the probe is inconclusive, the original search raises

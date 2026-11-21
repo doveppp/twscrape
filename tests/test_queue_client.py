@@ -1345,7 +1345,6 @@ async def test_xclid_parse_error_is_counted_and_raised_without_another_account(
     else:
         assert user1.active is False
         assert "Signing script not found" in (user1.error_msg or "")
-    assert user1.can_search is None
     assert len(messages) == 1
     assert "Signing script not found (3/3 assets loaded)" in messages[0]
     assert "username=user1" in messages[0]
@@ -1505,7 +1504,7 @@ async def test_search_check_false_rotates_and_replays_same_request(
 
     async def callback(username):
         calls.append(username)
-        await pool_mock.set_can_search(username, False)
+        await pool_mock.mark_inactive(username, "Search unavailable")
         return {
             "username": username,
             "can_search": False,
@@ -1527,12 +1526,11 @@ async def test_search_check_false_rotates_and_replays_same_request(
     assert mock.calls[0][2]["params"] == mock.calls[1][2]["params"] == params
 
     user1 = await pool_mock.get("user1")
-    assert user1.can_search is False
-    assert user1.active is True
+    assert user1.active is False
     assert user1.global_locked_until is None
     assert user1.xclid_fail_count == 0
     assert user1.unknown_fail_count == 0
-    assert "SearchTimeline" not in user1.locks
+    assert user1._tx is None
 
     await client.__aexit__(None, None, None)
     user2 = await pool_mock.get("user2")
@@ -1546,7 +1544,7 @@ async def test_search_check_all_accounts_false_stops(pool_mock: AccountsPool, mo
 
     async def callback(username):
         calls.append(username)
-        await pool_mock.set_can_search(username, False)
+        await pool_mock.mark_inactive(username, "Search unavailable")
         return {
             "username": username,
             "can_search": False,
@@ -1566,12 +1564,11 @@ async def test_search_check_all_accounts_false_stops(pool_mock: AccountsPool, mo
     await client.__aexit__(None, None, None)
 
     for account in await pool_mock.get_all():
-        assert account.can_search is False
-        assert account.active is True
+        assert account.active is False
         assert account.global_locked_until is None
         assert account.xclid_fail_count == 0
         assert account.unknown_fail_count == 0
-        assert account.locks == {}
+        assert account._tx is None
 
 
 async def test_search_check_duplicate_account_stops_rotation(pool_mock: AccountsPool, monkeypatch):
@@ -1608,7 +1605,7 @@ async def test_search_check_distinct_account_failures_are_capped(
 
     async def callback(username):
         calls.append(username)
-        await pool_mock.set_can_search(username, False)
+        await pool_mock.mark_inactive(username, "Search unavailable")
         return {
             "username": username,
             "can_search": False,
@@ -1625,7 +1622,7 @@ async def test_search_check_distinct_account_failures_are_capped(
 
     assert len(calls) == MAX_XCLID_FAILED_ACCOUNTS
     assert len(mock.calls) == MAX_XCLID_FAILED_ACCOUNTS + 1
-    untouched = [x for x in await pool_mock.get_all() if x.can_search is None]
+    untouched = [x for x in await pool_mock.get_all() if x.active]
     assert len(untouched) == 1 and untouched[0].active is True
 
     await client.__aexit__(None, None, None)
@@ -1663,7 +1660,6 @@ async def test_search_check_unconfirmed_aborts_without_penalty(
     await client.__aexit__(None, None, None)
 
     user1 = await pool_mock.get("user1")
-    assert user1.can_search is None
     assert user1.active is True
     assert user1.global_locked_until is None
     assert user1.xclid_fail_count == 0

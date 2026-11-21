@@ -31,7 +31,7 @@ ROUTE_FAILED = (
     None,
 )
 
-POSITIVE = {"updated": True, "can_search": True, "reason": "ok"}
+POSITIVE = {"updated": False, "can_search": True, "reason": "ok"}
 NEGATIVE = {"updated": True, "can_search": False, "reason": "search_internal_error"}
 INCONCLUSIVE = {"updated": False, "can_search": None, "reason": "empty_search"}
 
@@ -72,8 +72,6 @@ class FakePool:
     async def get_for_queue_or_wait(self, queue: str) -> Account | None:
         for account in self.accounts:
             if not account.active or account.username in self.handed:
-                continue
-            if queue == "SearchTimeline" and account.can_search is False:
                 continue
             if account.locks.get(queue) is not None:
                 continue

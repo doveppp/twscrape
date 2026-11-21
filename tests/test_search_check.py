@@ -28,19 +28,19 @@ class FakePool:
     def __init__(self, account: Account | None):
         self.account = account
         self.get_calls: list[str] = []
-        self.set_calls: list[tuple[str, bool]] = []
+        self.set_calls: list[tuple[str, str]] = []
         self.write_error: Exception | None = None
 
     async def get_account(self, username: str):
         self.get_calls.append(username)
         return self.account if self.account and self.account.username == username else None
 
-    async def set_can_search(self, username: str, can_search: bool):
+    async def mark_inactive(self, username: str, error_msg: str, tx=None):
         if self.write_error:
             raise self.write_error
-        self.set_calls.append((username, can_search))
+        self.set_calls.append((username, error_msg))
         if self.account:
-            self.account.can_search = can_search
+            self.account.active = False
 
 
 class RecordingClient(MockClient):
@@ -72,7 +72,6 @@ def make_account(
     *,
     username="user1",
     cookies=None,
-    can_search=None,
     active=True,
     proxy=None,
 ) -> Account:
@@ -84,7 +83,6 @@ def make_account(
         user_agent="@chrome",
         active=active,
         cookies={"auth_token": "token", "ct0": "csrf"} if cookies is None else cookies,
-        can_search=can_search,
         proxy=proxy,
     )
 
@@ -152,8 +150,8 @@ def assert_search_request(call, *, signed_path: str | None = None):
     assert kwargs["headers"]["x-client-transaction-id"] == f"tx:GET:{path}"
 
 
-async def test_positive_marks_true_and_uses_normal_search_request(monkeypatch):
-    account = make_account(active=False, can_search=False)
+async def test_positive_leaves_inactive_account_unchanged(monkeypatch):
+    account = make_account(active=False)
     pool = FakePool(account)
     api = make_api(pool, proxy="http://proxy.example:8080")
     client = RecordingClient()
@@ -167,12 +165,11 @@ async def test_positive_marks_true_and_uses_normal_search_request(monkeypatch):
     assert result == {
         "username": "user1",
         "can_search": True,
-        "updated": True,
+        "updated": False,
         "reason": "ok",
     }
     assert pool.get_calls == ["user1"]
-    assert pool.set_calls == [("user1", True)]
-    assert account.can_search is True
+    assert pool.set_calls == []
     assert make_client_calls == ["http://proxy.example:8080"]
     assert len(client.calls) == 1
     assert_search_request(client.calls[0])
@@ -198,8 +195,8 @@ async def test_positive_marks_true_and_uses_normal_search_request(monkeypatch):
         ),
     ],
 )
-async def test_repeated_known_failure_marks_false_with_fresh_id(monkeypatch, response, reason):
-    account = make_account(can_search=True)
+async def test_repeated_known_failure_deactivates_with_fresh_id(monkeypatch, response, reason):
+    account = make_account()
     pool = FakePool(account)
     api = make_api(pool)
     client = RecordingClient()
@@ -217,8 +214,8 @@ async def test_repeated_known_failure_marks_false_with_fresh_id(monkeypatch, res
         "updated": True,
         "reason": reason,
     }
-    assert pool.set_calls == [("user1", False)]
-    assert account.can_search is False
+    assert pool.set_calls == [("user1", f"Search unavailable ({reason})")]
+    assert account.active is False
     assert [x["fresh"] for x in gen_calls] == [False, True]
     assert limiter_calls == [True, True]
     assert len(client.calls) == 2
@@ -226,8 +223,8 @@ async def test_repeated_known_failure_marks_false_with_fresh_id(monkeypatch, res
     assert client.closed == 1
 
 
-async def test_404_then_positive_marks_true(monkeypatch):
-    account = make_account(can_search=False)
+async def test_404_then_positive_does_not_deactivate(monkeypatch):
+    account = make_account()
     pool = FakePool(account)
     api = make_api(pool)
     client = RecordingClient()
@@ -242,15 +239,15 @@ async def test_404_then_positive_marks_true(monkeypatch):
     assert result == {
         "username": "user1",
         "can_search": True,
-        "updated": True,
+        "updated": False,
         "reason": "ok",
     }
-    assert pool.set_calls == [("user1", True)]
+    assert pool.set_calls == []
     assert [x["fresh"] for x in gen_calls] == [False, True]
 
 
 async def test_single_known_failure_then_empty_stays_inconclusive(monkeypatch):
-    account = make_account(can_search=True)
+    account = make_account()
     pool = FakePool(account)
     api = make_api(pool)
     client = RecordingClient()
@@ -269,7 +266,6 @@ async def test_single_known_failure_then_empty_stays_inconclusive(monkeypatch):
         "reason": "empty_search",
     }
     assert pool.set_calls == []
-    assert account.can_search is True
     assert [x["fresh"] for x in gen_calls] == [False, True]
     assert client.closed == 1
 
@@ -283,7 +279,7 @@ async def test_errors_with_data_stays_inconclusive(monkeypatch, message, data_ki
         else {"data": {"search_by_raw_query": {"unexpected": "data"}}}
     )
     payload["errors"] = [{"code": 1, "message": message}]
-    account = make_account(can_search=True)
+    account = make_account()
     pool = FakePool(account)
     api = make_api(pool)
     client = RecordingClient()
@@ -301,7 +297,6 @@ async def test_errors_with_data_stays_inconclusive(monkeypatch, message, data_ki
         "reason": "http_200_errors",
     }
     assert pool.set_calls == []
-    assert account.can_search is True
     assert len(client.calls) == 1
     assert client.closed == 1
 
@@ -337,7 +332,7 @@ async def test_errors_with_data_stays_inconclusive(monkeypatch, message, data_ki
     ],
 )
 async def test_empty_or_cursor_only_does_not_overwrite(monkeypatch, payload):
-    account = make_account(can_search=True)
+    account = make_account()
     pool = FakePool(account)
     api = make_api(pool)
     client = RecordingClient()
@@ -352,7 +347,6 @@ async def test_empty_or_cursor_only_does_not_overwrite(monkeypatch, payload):
     assert result["updated"] is False
     assert result["reason"] == "empty_search"
     assert pool.set_calls == []
-    assert account.can_search is True
     assert client.closed == 1
 
 
@@ -361,7 +355,7 @@ async def test_empty_or_cursor_only_does_not_overwrite(monkeypatch, payload):
     [(401, "http_401"), (403, "http_403"), (429, "http_429"), (500, "http_500")],
 )
 async def test_other_http_failures_do_not_overwrite(monkeypatch, status, reason):
-    account = make_account(can_search=True)
+    account = make_account()
     pool = FakePool(account)
     api = make_api(pool)
     client = RecordingClient()
@@ -379,14 +373,13 @@ async def test_other_http_failures_do_not_overwrite(monkeypatch, status, reason)
         "reason": reason,
     }
     assert pool.set_calls == []
-    assert account.can_search is True
     assert [x["fresh"] for x in gen_calls] == [False]
     assert len(client.calls) == 1
     assert client.closed == 1
 
 
 async def test_invalid_json_and_transport_error_do_not_overwrite(monkeypatch):
-    account = make_account(can_search=True)
+    account = make_account()
     pool = FakePool(account)
     api = make_api(pool)
     client = RecordingClient()
@@ -405,12 +398,11 @@ async def test_invalid_json_and_transport_error_do_not_overwrite(monkeypatch):
     assert transport["reason"] == "NetworkError"
     assert "private proxy detail" not in transport["reason"]
     assert pool.set_calls == []
-    assert account.can_search is True
     assert client.closed == 2
 
 
 async def test_signing_error_does_not_overwrite(monkeypatch):
-    account = make_account(can_search=True)
+    account = make_account()
     pool = FakePool(account)
     api = make_api(pool)
     client = RecordingClient()
@@ -429,14 +421,13 @@ async def test_signing_error_does_not_overwrite(monkeypatch):
     assert result["reason"] == "XClIdParseError"
     assert "private cookie detail" not in result["reason"]
     assert pool.set_calls == []
-    assert account.can_search is True
     assert client.calls == []
     assert limiter_calls == []
     assert client.closed == 1
 
 
 async def test_timeout_does_not_overwrite_and_closes_client(monkeypatch):
-    account = make_account(can_search=True)
+    account = make_account()
     pool = FakePool(account)
     api = make_api(pool)
     client = HangingClient()
@@ -454,12 +445,11 @@ async def test_timeout_does_not_overwrite_and_closes_client(monkeypatch):
         "reason": "TimeoutError",
     }
     assert pool.set_calls == []
-    assert account.can_search is True
     assert client.closed == 1
 
 
 async def test_cancellation_closes_client(monkeypatch):
-    account = make_account(can_search=True)
+    account = make_account()
     pool = FakePool(account)
     api = make_api(pool)
     client = HangingClient()
@@ -475,7 +465,6 @@ async def test_cancellation_closes_client(monkeypatch):
         await task
 
     assert pool.set_calls == []
-    assert account.can_search is True
     assert client.closed == 1
 
 
@@ -493,7 +482,7 @@ async def test_missing_account_and_session_leave_db_unchanged(monkeypatch):
     }
     assert missing_pool.set_calls == []
 
-    account = make_account(cookies={}, can_search=True)
+    account = make_account(cookies={})
     session_pool = FakePool(account)
     session_api = make_api(session_pool)
     client = RecordingClient()
@@ -510,7 +499,6 @@ async def test_missing_account_and_session_leave_db_unchanged(monkeypatch):
         "reason": "missing_session",
     }
     assert session_pool.set_calls == []
-    assert account.can_search is True
     assert client.calls == []
 
 
@@ -520,7 +508,7 @@ async def test_db_write_error_propagates(monkeypatch):
     pool.write_error = RuntimeError("db unavailable")
     api = make_api(pool)
     client = RecordingClient()
-    client.add_response(json=load("raw_search"))
+    client.add_response(status_code=404).add_response(status_code=404)
     patch_client(monkeypatch, client)
     patch_gen(monkeypatch)
     patch_limiter(monkeypatch)
