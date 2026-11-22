@@ -30,6 +30,34 @@ ROUTE_FAILED = (
     "",
     None,
 )
+# What X actually sends for an account-level search restriction: the error plus a
+# non-empty data envelope whose timeline holds only cursors.
+ROUTE_FAILED_EMPTY_TIMELINE = (
+    "response",
+    200,
+    {
+        "data": {
+            "search_by_raw_query": {
+                "search_timeline": {
+                    "timeline": {
+                        "instructions": [
+                            {
+                                "type": "TimelineAddEntries",
+                                "entries": [
+                                    {"entryId": "cursor-bottom-1234567890"},
+                                    {"entryId": "messageprompt-follow"},
+                                ],
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        "errors": [{"code": -1, "message": "Internal server error"}],
+    },
+    "",
+    None,
+)
 
 POSITIVE = {"updated": False, "can_search": True, "reason": "ok"}
 NEGATIVE = {"updated": True, "can_search": False, "reason": "search_internal_error"}
@@ -216,6 +244,20 @@ async def test_negative_probe_rotates_without_replay(monkeypatch):
     assert calls == ["user1"]
     assert mock.calls[0]["params"] is mock.calls[1]["params"] is PARAMS
     assert pool.accounts[0].active and pool.accounts[0].locks == {}
+
+
+async def test_empty_timeline_internal_error_is_probed_and_rotated(monkeypatch):
+    # 线上形态：200 + Internal server error + 只有 cursor 的 timeline
+    callback, calls = recorder(NEGATIVE)
+    pool = FakePool([make_account("user1"), make_account("user2")])
+    client, mock = make_client(monkeypatch, pool, callback)
+    mock.add(ROUTE_FAILED_EMPTY_TIMELINE, SEARCH_OK)
+
+    rep = await client.get(URL, params=PARAMS)
+
+    assert getattr(rep, "__username") == "user2"
+    assert calls == ["user1"]
+    assert len(mock.calls) == 2
 
 
 async def test_negative_probe_same_account_twice_aborts(monkeypatch):

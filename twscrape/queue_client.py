@@ -205,6 +205,51 @@ def search_error_messages(res: dict) -> list[str]:
     return [str(x.get("message", "")) if isinstance(x, dict) else str(x) for x in errors]
 
 
+# Timeline entries that carry no tweets: cursors and injected modules keep
+# empty pages alive while an account-level restriction holds.
+_NON_TWEET_ENTRY_PREFIX = ("cursor-", "messageprompt-", "module-", "who-to-follow-")
+
+
+def search_has_content(rep: Response, res: dict) -> bool:
+    """Return True when a SearchTimeline response carries real timeline entries.
+
+    X answers an account-level search restriction with 200 + "Internal server
+    error" and a data envelope that is not empty (an empty timeline with a
+    cursor). has_data() reads that envelope as a successful page, so the
+    failure would never be attributed to the account.
+    """
+    data = res.get("data")
+    if not isinstance(data, dict) or not data:
+        return False
+
+    query = data.get("search_by_raw_query")
+    if not isinstance(query, dict) or not query:
+        return has_data(rep, res)  # not a search payload: keep the conservative answer
+
+    timeline_obj = query.get("search_timeline")
+    if not isinstance(timeline_obj, dict):
+        return has_data(rep, res)  # unknown shape: keep the conservative answer
+    timeline = timeline_obj.get("timeline")
+    if not isinstance(timeline, dict) or not timeline:
+        # A restricted search answers {"search_timeline": {}}: no timeline at all.
+        return False
+
+    instructions = timeline.get("instructions")
+    if not isinstance(instructions, list):
+        return True
+    for instruction in instructions:
+        if not isinstance(instruction, dict):
+            return True
+        entries = instruction.get("entries")
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            entry_id = str(entry.get("entryId", "")) if isinstance(entry, dict) else ""
+            if entry_id and not entry_id.startswith(_NON_TWEET_ENTRY_PREFIX):
+                return True
+    return False
+
+
 def search_failure_reason(rep: Response) -> str | None:
     """Return a known SearchTimeline route-failure reason, else None."""
     if rep.status_code == 404 and not rep.text.strip():
@@ -220,9 +265,11 @@ def search_failure_reason(rep: Response) -> str | None:
         return None
 
     errors = search_error_messages(res)
-    if not errors or has_data(rep, res):
+    if not errors:
         return None
-    if any("internal server error" in x.lower() for x in errors):
+    # An account-level restriction still carries an empty timeline in `data`, so
+    # classify it before has_data() can read the envelope as a successful page.
+    if any("internal server error" in x.lower() for x in errors) and not search_has_content(rep, res):
         return "search_internal_error"
     return None
 

@@ -193,6 +193,16 @@ async def test_positive_leaves_inactive_account_unchanged(monkeypatch):
             {"json": {"errors": [{"code": -1, "message": "Internal server error"}]}},
             "search_internal_error",
         ),
+        # 线上真实形态：错误 + 空的 search_timeline 包络
+        (
+            {
+                "json": {
+                    "data": {"search_by_raw_query": {"search_timeline": {}}},
+                    "errors": [{"code": -1, "message": "Internal server error"}],
+                }
+            },
+            "search_internal_error",
+        ),
     ],
 )
 async def test_repeated_known_failure_deactivates_with_fresh_id(monkeypatch, response, reason):

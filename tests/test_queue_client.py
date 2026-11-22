@@ -1718,6 +1718,98 @@ async def test_search_internal_error_with_partial_data_is_not_checked(
     await client.__aexit__(None, None, None)
 
 
+async def test_search_internal_error_with_empty_timeline_is_checked(
+    pool_mock: AccountsPool, monkeypatch
+):
+    """A restricted account answers 200 with an empty timeline, not an empty body."""
+    await add_search_accounts(pool_mock)
+    calls = []
+
+    async def callback(username):
+        calls.append(username)
+        await pool_mock.mark_inactive(username, "Search unavailable")
+        return {
+            "username": username,
+            "can_search": False,
+            "updated": True,
+            "reason": "search_internal_error",
+        }
+
+    client, mock = search_client(monkeypatch, pool_mock, callback)
+    payload = {
+        "data": {
+            "search_by_raw_query": {
+                "search_timeline": {
+                    "timeline": {
+                        "instructions": [
+                            {
+                                "type": "TimelineAddEntries",
+                                "entries": [
+                                    {"entryId": "cursor-bottom-1234567890"},
+                                    {"entryId": "messageprompt-follow"},
+                                ],
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        "errors": [{"code": -1, "message": "Internal server error"}],
+    }
+    mock.add_response(json=payload)
+    mock.add_response(json={"ok": True})
+
+    rep = await client.get(URL)
+
+    assert getattr(rep, "__username") == "user2"
+    assert calls == ["user1"]
+
+    user1 = await pool_mock.get("user1")
+    assert user1.active is False
+    assert user1.xclid_fail_count == 0
+    assert user1.unknown_fail_count == 0
+    assert user1._tx is None
+
+    await client.__aexit__(None, None, None)
+
+
+async def test_search_internal_error_with_partial_timeline_is_not_checked(
+    pool_mock: AccountsPool, monkeypatch
+):
+    """A page that does carry tweets is content, so a stray error is not a restriction."""
+    await add_search_accounts(pool_mock, 1)
+    calls = []
+
+    async def callback(username):
+        calls.append(username)
+        raise AssertionError("callback must not run")
+
+    client, mock = search_client(monkeypatch, pool_mock, callback)
+    payload = {
+        "data": {
+            "search_by_raw_query": {
+                "search_timeline": {
+                    "timeline": {
+                        "instructions": [
+                            {"type": "TimelineAddEntries", "entries": [{"entryId": "tweet-1"}]}
+                        ]
+                    }
+                }
+            }
+        },
+        "errors": [{"code": -1, "message": "Internal server error"}],
+    }
+    mock.add_response(json=payload)
+
+    rep = await client.get(URL)
+
+    assert rep is not None and rep.json() == payload
+    assert calls == []
+    assert len(mock.calls) == 1
+
+    await client.__aexit__(None, None, None)
+
+
 async def test_empty_search_does_not_run_check(pool_mock: AccountsPool, monkeypatch):
     await add_search_accounts(pool_mock, 1)
     calls = []
